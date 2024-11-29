@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Conversion Service</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        .form-container {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #ccc;
+        }
+        .form-container label {
+            display: inline-block;
+            width: 200px;
+            text-align: right;
+            margin-right: 10px;
+        }
+        .form-container input, .form-container select, .form-container button {
+            margin-bottom: 10px;
+        }
+        .form-container button {
+            margin-left: 210px;
+        }
+        #message {
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px;
+            border: 1px solid #ccc;
+            display: none;
+            z-index: 1000;
+        }
+        #message.success {
+            border-color: green;
+            color: green;
+        }
+        #message.error {
+            border-color: red;
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Image Conversion Service</h1>
+
+    <div class="form-container">
+        <form id="convertImageForm">
+            <label for="logo_path">原图(PNG|SVG):</label>
+            <input type="file" id="logo_path" name="logo_path" required><br>
+            <label for="output_path">保存名称:</label>
+            <input type="text" id="output_path" name="output_path" placeholder="ICO,ICON,ICNS,常用图片格式" required><br>
+            <button type="submit">格式转换</button>
+        </form>
+    </div>
+
+    <div class="form-container">
+        <form id="oemConvertForm">
+            <label for="oem_logo_path">原图(PNG|SVG):</label>
+            <input type="file" id="oem_logo_path" name="logo_path" required><br>
+            <label for="document_path">MAC文档图:</label>
+            <input type="file" id="document_path" name="document_path"><br>
+            <button type="submit">oem转换</button>
+        </form>
+    </div>
+
+    <div class="form-container">
+        <form id="addRoundedCornersForm">
+            <label for="corner_logo_path">原图(PNG):</label>
+            <input type="file" id="corner_logo_path" name="logo_path" required><br>
+            <label for="radius">圆角大小:</label>
+            <input type="text" id="radius" name="radius" required><br>
+            <button type="submit">添加圆角</button>
+        </form>
+    </div>
+
+    <div id="message"></div>
+
+    <script>
+        async function getBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = error => reject(error);
+            });
+        }
+
+        function showMessage(message, isSuccess) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.textContent = message;
+            messageDiv.className = isSuccess ? 'success' : 'error';
+            messageDiv.style.display = 'block';
+        }
+
+        document.getElementById('convertImageForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const file = formData.get('logo_path');
+            const logo_name = file.name;
+            const logo_data = await getBase64(file);
+            const output_path = formData.get('output_path');
+            const format = output_path.split('.').pop();
+
+            if (!format || format === output_path) {
+                showMessage('保存名称需要有后缀名', false);
+                return;
+            }
+
+            const payload = {
+                logo_name: logo_name,
+                logo_data: logo_data,
+                output_path: output_path,
+                format: format.toUpperCase()
+            };
+
+            const response = await fetch('http://localhost:3000/convert_image', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const responseData = await response.text();
+            if (response.ok) {
+                showMessage(responseData, true);
+            } else {
+                showMessage(responseData, false);
+            }
+        });
+
+        document.getElementById('oemConvertForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const file = formData.get('logo_path');
+            const logo_name = file.name;
+            const logo_data = await getBase64(file);
+            const document_file = formData.get('document_path');
+            let document_name = "";
+            let document_data = "";
+
+            if (document_file && document_file.size > 0) {
+                document_name = document_file.name;
+                document_data = await getBase64(document_file);
+            }
+
+            const payload = {
+                logo_name: logo_name,
+                logo_data: logo_data,
+                document_name: document_name,
+                document_data: document_data
+            };
+
+            const response = await fetch('http://localhost:3000/oem_convert', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const responseData = await response.text();
+            if (response.ok) {
+                showMessage(responseData, true);
+            } else {
+                showMessage(responseData, false);
+            }
+        });
+
+        document.getElementById('addRoundedCornersForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const file = formData.get('logo_path');
+            const logo_name = file.name;
+            const logo_data = await getBase64(file);
+            const radius = formData.get('radius');
+
+            const payload = {
+                logo_name: logo_name,
+                logo_data: logo_data,
+                radius: radius
+            };
+
+            const response = await fetch('http://localhost:3000/add_rounded_corners', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const responseData = await response.text();
+            if (response.ok) {
+                showMessage(responseData, true);
+            } else {
+                showMessage(responseData, false);
+            }
+        });
+    </script>
+</body>
+</html>
