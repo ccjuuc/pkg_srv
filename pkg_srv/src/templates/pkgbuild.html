@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Package Build Service</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            color: #333;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        tr:hover {
+            background-color: #f1f1f1;
+        }
+        .form-container {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #ccc;
+        }
+        .form-container label {
+            display: inline-block;
+            width: 200px;
+            text-align: right;
+            margin-right: 10px;
+        }
+        .form-container input, .form-container select, .form-container button {
+            margin-bottom: 10px;
+        }
+        .form-container button {
+            margin-left: 210px;
+        }
+        #message {
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px;
+            border: 1px solid #ccc;
+            display: none;
+            z-index: 1000;
+        }
+        #message.success {
+            border-color: green;
+            color: green;
+        }
+        #message.error {
+            border-color: red;
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Package Build Service</h1>
+
+    <div class="form-container">
+        <form id="buildPackageForm">
+            <label for="branch">Select Branch:</label>
+            <select id="branch" name="branch" required>
+                <option value="main">main</option>
+                <option value="develop">develop</option>
+                <!-- Add more branches as needed -->
+            </select><br>
+            <label for="commit_id">Commit ID:</label>
+            <input type="text" id="commit_id" name="commit_id" placeholder="Enter commit ID"><br>
+            <label for="oem_name">oem_name:</label>
+            <input type="text" id="oem_name" name="oem_name" placeholder="Enter OEM name"><br>
+            <label for="platform">Select Platform:</label>
+            <select id="platform" name="platform" required>
+                <option value="windows">windows</option>
+                <option value="mac">macos</option>
+                <option value="linux">linux</option>
+            </select><br>
+            <label for="server">Select Server:</label>
+            <select id="server" name="server" required>
+            </select><br>
+            <label for="is_increment">Incremental:</label>
+            <input type="checkbox" id="is_increment" name="is_increment"><br>
+            <label for="is_signed">Signed:</label>
+            <input type="checkbox" id="is_signed" name="is_signed"><br>
+            <button type="submit">Build Package</button>
+        </form>
+    </div>
+
+    <table id="taskTable">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Start Time</th>
+                <th>End Time</th>
+                <th>Branch Name</th>
+                <th>OEM Name</th>
+                <th>Commit ID</th>
+                <th>Is Signed</th>
+                <th>Is Increment</th>
+                <th>MD5</th>
+                <th>Installer</th>
+                <th>State</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+        </tbody>
+    </table>
+
+    <div id="message"></div>
+
+    <script>
+        function showMessage(message, isSuccess) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.textContent = message;
+            messageDiv.className = isSuccess ? 'success' : 'error';
+            messageDiv.style.display = 'block';
+            setTimeout(() => {
+                messageDiv.style.display = 'none';
+            }, 10000);
+        }
+
+        async function fetchTasks() {
+            const baseUrl = window.location.origin;
+            try {
+                const response = await fetch(`${baseUrl}/tasklist`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                });
+                const data = await response.json();
+                updateTaskTable(data.tasks);
+            } catch (error) {
+                console.error('Error fetching tasks:', error);
+            }
+        }
+
+        function updateTaskTable(tasks) {
+            const tbody = document.getElementById('taskTable').getElementsByTagName('tbody')[0];
+            tbody.innerHTML = ''; // 清空表格内容
+
+            tasks.forEach(task => {
+                const row = tbody.insertRow();
+                row.insertCell().textContent = task.id;
+                row.insertCell().textContent = task.start_time;
+                row.insertCell().textContent = task.end_time;
+                row.insertCell().textContent = task.branch_name;
+                row.insertCell().textContent = task.oem_name;
+                row.insertCell().textContent = task.commit_id;
+                row.insertCell().textContent = task.is_signed;
+                row.insertCell().textContent = task.is_increment;
+                row.insertCell().textContent = task.md5;
+
+                const installerCell = row.insertCell();
+                const installerLink = document.createElement('a');
+                installerLink.href = `http://${task.server}/download/${task.storage_path}/${task.installer}`;
+                installerLink.textContent = task.installer;
+                installerLink.target = "_blank";
+                installerCell.appendChild(installerLink);
+
+                row.insertCell().textContent = task.state;
+
+                const actionCell = row.insertCell();
+                const deleteButton = document.createElement('button');
+                deleteButton.textContent = "Delete";
+                deleteButton.onclick = async () => {
+                    await del_backup(task.id, task.server);
+                    fetchTasks(); //
+                };
+                actionCell.appendChild(deleteButton);
+            });
+        }
+
+        async function del_backup(task_id, server) {
+            try {
+                console.log("Deleting backup with ID:", task_id);
+                console.log("Server:", server);
+                const response = await fetch(`http://${server}/delete_task`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ task_id })
+                });
+
+                if (response.ok) {
+                    showMessage("Backup deleted successfully", true);
+                } else {
+                    showMessage("Failed to delete backup", false);
+                }
+            } catch (error) {
+                showMessage("Error deleting backup", false);
+            }
+        }
+
+        async function fetchServerList() {
+            const baseUrl = window.location.origin;
+            const response = await fetch(`${baseUrl}/platform_cfg`);
+            const data = await response.json();
+            const serverSelect = document.getElementById('server');
+
+            // 清空现有选项
+            serverSelect.innerHTML = '';
+
+            // 动态填充服务器列表
+            let firstServer = '';
+            for (const platform in data) {
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = platform.charAt(0).toUpperCase() + platform.slice(1);
+                data[platform].forEach(server => {
+                    const option = document.createElement('option');
+                    option.value = server;
+                    option.textContent = server;
+                    optgroup.appendChild(option);
+                    if (firstServer === '') {
+                        firstServer = server;
+                    }
+                });
+                serverSelect.appendChild(optgroup);
+            }
+            serverSelect.value = firstServer;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchTasks();
+            fetchServerList();
+            setInterval(fetchTasks, 3000);
+        });
+
+        document.getElementById('buildPackageForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const branch = formData.get('branch');
+            const commit_id = formData.get('commit_id');
+            let oem_name = formData.get('oem_name');
+            const platform = formData.get('platform');
+            const server = formData.get('server');
+            const is_increment = formData.get('is_increment') === 'on';
+            const is_signed = formData.get('is_signed') === 'on';
+
+            const payload = {
+                branch: branch,
+                commit_id: commit_id,
+                oem_name: oem_name,
+                platform: platform,
+                is_increment,
+                is_signed,
+                server,
+            };
+
+            try {
+                const response = await fetch(`http://${server}/build_package`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                const responseData = await response.text();
+                if (response.ok) {
+                    showMessage(responseData, true);
+                } else {
+                    showMessage(responseData, false);
+                }
+            } catch (error) {
+                showMessage(`服务器不可用: ${platform} ${server}`, false);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -12,7 +12,7 @@ pub fn apply_rounded_corners(fpath: &str, radius: &str) -> String {
     let right_bottom_radius;
     
     let radius_vec: Vec<&str> = radius.split(",").collect();
-    if radius_vec.len() != 4 {
+    if radius_vec.len() == 4 {
         left_top_radius = radius_vec[0].parse().expect("Failed to parse radius");
         right_top_radius = radius_vec[1].parse().expect("Failed to parse radius");
         left_bottom_radius = radius_vec[2].parse().expect("Failed to parse radius");
@@ -167,16 +167,51 @@ pub fn generate_chromium_ico(fpath: &str,out_path: &str) -> String{
     output_path.to_str().unwrap().to_string()
 }
 
-pub fn generate_chromium_icns(fpath: &str, out_path: &str) -> String {
+pub fn generate_chromium_document_icns(fpath: &str, out_path: &str) -> String {
+    let input_path = Path::new(fpath);
+    let output_path = PathBuf::from(input_path.parent().unwrap());
+    let logo_add = output_path.join("product_logo_192.png");
+    let mut img = image::open(fpath).expect("Failed to open image");
+    if img.width() != 256 {
+        img = resize_image_with_scaler(fpath, None, 256, 256).unwrap();
+    }
+    let logo = image::open(logo_add).expect("Failed to open logo");
+    let (width, height) = img.dimensions();
+    let (logo_width, logo_height) = logo.dimensions();
+    let x = (width - logo_width) / 2;
+    let y = height - logo_height;
+    image::imageops::overlay(&mut img, &logo, x as i64, y as i64);
+    let document_path = output_path.join("tmp.png");
+    img.save(&document_path).expect("Failed to save image");
+    generate_chromium_icns(document_path.to_str().unwrap(), out_path, false)
+}
+
+pub fn generate_chromium_icns(fpath: &str, out_path: &str, border: bool) -> String {
     println!("Generating chromium icns {}", fpath);
     let input_path = Path::new(fpath);
     let output_path = PathBuf::from(input_path.parent().unwrap()).join(out_path);
+    
+    let mut fix_path = input_path.to_path_buf();
+    if border {
+        let img = image::open(fpath).expect("Failed to open image");
+        let (width, height) = img.dimensions();
+        let rate = width / 256;
+        let resize_size = 208 * rate;
+        let resized_img = resize_image_with_scaler(fpath, None, resize_size, resize_size);
+        let mut img = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(width, height);
+        let x = (width - resize_size) / 2;
+        let y = (height - resize_size) / 2;
+        image::imageops::overlay(&mut img, &resized_img.unwrap(), x as i64, y as i64);
+        let tmp_path = PathBuf::from(input_path.parent().unwrap()).join("tmp_app.png");
+        fix_path = tmp_path;
+        DynamicImage::ImageRgba8(img).save(&fix_path).expect("Failed to save image");
+    }
 
     let sizes = vec![512, 256, 128, 64, 32, 16];
     let mut icon_family = IconFamily::new();
 
     for size in sizes {
-        let resized_img = resize_image_with_scaler(fpath, None, size, size);
+        let resized_img = resize_image_with_scaler(fix_path.to_str().unwrap(), None, size, size);
         if let Some(resized_img) = resized_img {
             let rgba32f = resized_img.to_rgba32f();
             let rgba: Vec<u8> = rgba32f.iter().map(|&f| (f * 255.0) as u8).collect();
