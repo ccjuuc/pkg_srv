@@ -30,6 +30,7 @@ macos = "/Users/snow_commit/backup"
 [server]
 windows = ["localhost:3000","10.0.10.14:3000", "10.0.10.14:3001"]
 macos = [""]
+linux = ["10.2.0.239:3000"]
 
 [gn_default_args]
 windows = [

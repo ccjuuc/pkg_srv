@@ -27,14 +27,14 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "macos")]
 mod os {
-    pub const SHELL: [&str; 2] = ["sh", "-C"];
+    pub const SHELL: [&str; 2] = ["sh", "-c"];
     pub const IDE: &str = "xcode";
     pub const INSTALLER_PROJECT: &str = "chrome/installer/mac";
 }
 
 #[cfg(target_os = "linux")]
 mod os {
-    pub const SHELL: [&str; 2] = ["sh", "-C"];
+    pub const SHELL: [&str; 2] = ["sh", "-c"];
     pub const IDE: &str = "";
     pub const INSTALLER_PROJECT: &str = "chrome/installer/linux:stable";
 }
@@ -641,20 +641,24 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
     if let Some(dev_tools) = config.get("dev_tools") {
         if let Some(dev_path) = dev_tools.get(std::env::consts::OS) {
             let current_path = env::var("PATH").unwrap_or_default();
-            let env_additon = format!("{};{}", current_path, dev_path.as_str().unwrap());
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            let env_additon = format!("{}{}{}", dev_path.as_str().unwrap(),separator, current_path);
             env::set_var("PATH", env_additon.clone());
         }
     }
 
     let gn_output: Output;
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    {
         gn_output = Command::new(os::SHELL[0])
             .arg(os::SHELL[1])
             .raw_arg(gn_args.join(" "))
             .current_dir(&src_path)
             .output()
             .expect("failed to execute gn command");
-    } else {
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
         gn_output = Command::new(os::SHELL[0])
             .arg(os::SHELL[1])
             .arg(gn_args.join(" "))
@@ -662,7 +666,6 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
             .output()
             .expect("failed to execute gn command");
     }
-
     if gn_output.status.success() {
         print_info(&gn_output.stdout);
     } else {
