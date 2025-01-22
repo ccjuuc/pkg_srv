@@ -3,6 +3,8 @@ clean_path = [
   "out/Release/gen/snow_overrides/build",
 ]
 
+sign_server = "10.2.0.47:10839"
+
 oem = [
   "normal",
   "nuctech",
@@ -19,33 +21,32 @@ db = "backup.db"
 
 [dev_tools]
 windows = "E:/snow_commit/dev_tools"
-linux = "/home/snow_commit/dev_tools"
-macos = "/Users/snow_commit/dev_tools"
+linux = "/home/snowtech/code/132/source/depot_tools"
+macos = "/Users/snow/code/git/dev_tools"
+
+[python]
+linux = "/home/snowtech/code/132/source/depot_tools/python-bin"
+macos = "/Users/snow/code/git/dev_tools/python-bin"
+
 
 [backup_path]
 windows = "E:/snow_commit/backup"
-linux = "/home/snow_commit/backup"
-macos = "/Users/snow_commit/backup"
+linux = "/home/snowtech/backup"
+macos = "/Users/snow/backup"
 
 [server]
-windows = ["localhost:3000","10.0.10.14:3000", "10.0.10.14:3001"]
-macos = [""]
+windows = ["localhost:3000","10.0.10.14:3000"]
+macos = ["10.0.80.38:3000"]
 linux = ["10.2.0.239:3000"]
 
 [gn_default_args]
 windows = [
-  "enable_password_manager_extensions=true",
   "is_debug=false",
   "is_component_build=false",
-  "symbol_level=0",
-  "blink_symbol_level=0",
-  "v8_symbol_level=0",
-  "enable_nacl=false",
   "is_clang=true",
   "is_official_build=true"
 ]
 linux = [
-  "enable_password_manager_extensions=true",
   "grpc_use_static_linking=true",
   "is_official_build=true",
   "use_large_pdbs=true",

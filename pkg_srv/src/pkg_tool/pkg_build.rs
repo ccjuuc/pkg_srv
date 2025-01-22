@@ -492,7 +492,7 @@ async fn calc_installer_md5(pkg_path: &str, extension: &str) -> (String, String)
 }
 
 
-async fn build_installer(src_path: &str, out_dir: &str, config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, x64: bool) -> anyhow::Result<()> {
+async fn build_installer(src_path: &str, out_dir: &str, _config: toml::Value, server_addr: &str, task_id: i64, _payload: &PkgBuildRequest, db_pool: &SqlitePool, _x64: bool) -> anyhow::Result<()> {
         update_task_state(
             &server_addr,
             task_id,
@@ -512,13 +512,14 @@ async fn build_installer(src_path: &str, out_dir: &str, config: toml::Value, ser
             .spawn()
             .expect("failed to execute build installer command");
         if !mini_installer_output.wait().unwrap().success() {
-            return Err(anyhow::anyhow!(task_id));
+            println!("mini_installer failed");
+            return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, mini_installer_command)));
         }
 
     Ok(())
 }
 
-async fn build_project(src_path: &str, out_dir: &str, config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, x64: bool) -> anyhow::Result<()> {
+async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, server_addr: &str, task_id: i64, _payload: &PkgBuildRequest, db_pool: &SqlitePool, _x64: bool) -> anyhow::Result<()> {
     update_task_state(
         &server_addr,
         task_id,
@@ -539,7 +540,8 @@ async fn build_project(src_path: &str, out_dir: &str, config: toml::Value, serve
         .expect("failed to execute pre_build command");
 
     if !pre_build_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
+        println!("pre_build failed");
+        return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, pre_build_command)));
     }
 
     update_task_state(&server_addr, task_id, "", "", "", "", "build base", db_pool).await;
@@ -551,7 +553,8 @@ async fn build_project(src_path: &str, out_dir: &str, config: toml::Value, serve
         .spawn()
         .expect("failed to execute base build command");
     if !base_build_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
+        println!("base_build failed");
+        return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, base_build_command)));
     }
 
     update_task_state(
@@ -574,7 +577,8 @@ async fn build_project(src_path: &str, out_dir: &str, config: toml::Value, serve
         .expect("failed to execute chrome build command");
     
     if !chrome_build_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
+        println!("chrome_build failed");
+        return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, chrome_build_command)));
     }
 
     Ok(())
@@ -593,11 +597,10 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
         }
     }
 
-    let target_cpu = format!(
-        "target_cpu=\\\"{}\\\"",
-        if x64 { "x64" } else { "x86" }
-    );
-    args.push(&target_cpu);
+    let target_cpu = if x64 { "target_cpu=\\\"x64\\\"" } else { "" };
+    if !target_cpu.is_empty() {
+        args.push(target_cpu);
+    }
     
     #[warn(unused_assignments)]
     let mut oem_arg = "".to_string();
@@ -607,6 +610,8 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
         oem_arg = format!("{}=\\\"{}\\\"", prefix, oem);
         args.push(&oem_arg);
     }
+
+    println!("oem_arg: {}", oem_arg);
 
     if payload.password.is_empty() {
         args.push(&payload.password);
@@ -637,15 +642,6 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
         &format!("--args=\"{}\"", args.join(" ")),
         ide_args,
     ];
-    
-    if let Some(dev_tools) = config.get("dev_tools") {
-        if let Some(dev_path) = dev_tools.get(std::env::consts::OS) {
-            let current_path = env::var("PATH").unwrap_or_default();
-            let separator = if cfg!(windows) { ";" } else { ":" };
-            let env_additon = format!("{}{}{}", dev_path.as_str().unwrap(),separator, current_path);
-            env::set_var("PATH", env_additon.clone());
-        }
-    }
 
     let gn_output: Output;
     #[cfg(target_os = "windows")]
@@ -892,6 +888,29 @@ pub async fn init_db() -> anyhow::Result<sqlx::SqlitePool> {
     let db_name = config["src"]["db"].as_str().unwrap_or_default();
 
     let need_close = db_name.is_empty();
+
+    //init env
+    env::set_var("XN_BUILD", "1");
+    let sign_server = config.get("sign").map_or("", |v| v.as_str().unwrap_or(""));
+    env::set_var("SNOW_SIGN_ADDRESS", sign_server);
+    if let Some(dev_tools) = config.get("dev_tools") {
+        if let Some(dev_path) = dev_tools.get(std::env::consts::OS) {
+            let current_path = env::var("PATH").unwrap_or_default();
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            let env_additon = format!("{}{}{}", dev_path.as_str().unwrap(),separator, current_path);
+            env::set_var("PATH", env_additon.clone());
+        }
+    }
+
+    if let Some(python) = config.get("python") {
+        if let Some(python_path) = python.get(std::env::consts::OS) {
+            let current_path = env::var("PATH").unwrap_or_default();
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            let env_additon = format!("{}{}{}", python_path.as_str().unwrap(),separator, current_path);
+            env::set_var("PATH", env_additon.clone());
+        }
+    }
+    //init env
 
     if db_name.is_empty() {
         database_path.push("pkg.db");
