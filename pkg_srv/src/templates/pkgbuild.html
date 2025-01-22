@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,43 +9,56 @@
         body {
             font-family: Arial, sans-serif;
         }
+
         table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 20px;
         }
-        th, td {
+
+        th,
+        td {
             border: 1px solid #ddd;
             padding: 8px;
             text-align: left;
         }
+
         th {
             background-color: #f2f2f2;
             color: #333;
         }
+
         tr:nth-child(even) {
             background-color: #f9f9f9;
         }
+
         tr:hover {
             background-color: #f1f1f1;
         }
+
         .form-container {
             margin-bottom: 20px;
             padding-bottom: 20px;
             border-bottom: 1px solid #ccc;
         }
+
         .form-container label {
             display: inline-block;
             width: 200px;
             text-align: right;
             margin-right: 10px;
         }
-        .form-container input, .form-container select, .form-container button {
+
+        .form-container input,
+        .form-container select,
+        .form-container button {
             margin-bottom: 10px;
         }
+
         .form-container button {
             margin-left: 210px;
         }
+
         #message {
             position: fixed;
             top: 10px;
@@ -55,18 +69,33 @@
             display: none;
             z-index: 1000;
         }
+
         #message.success {
             border-color: green;
             color: green;
         }
+
         #message.error {
             border-color: red;
             color: red;
         }
+
+        #h1 a {
+            display: inline-block;
+        }
+
+        #oem_container{
+            display: inline-block;
+            margin-left: 5px;
+        }
+        #oem_container label{
+            margin-left: 0;
+        }
     </style>
 </head>
+
 <body>
-    <h1>Package Build Service</h1>
+    <h1>Package Build Service</h1> <a href="/oem">oem</a>
 
     <div class="form-container">
         <form id="buildPackageForm">
@@ -74,23 +103,21 @@
             <select id="branch" name="branch" required>
                 <option value="main">main</option>
                 <option value="develop">develop</option>
-                <!-- Add more branches as needed -->
             </select><br>
             <label for="commit_id">Commit ID:</label>
             <input type="text" id="commit_id" name="commit_id" placeholder="Enter commit ID"><br>
-            <label for="oem_name">oem_name:</label>
-            <input type="text" id="oem_name" name="oem_name" placeholder="Enter OEM name"><br>
-            <label for="platform">Select Platform:</label>
-            <select id="platform" name="platform" required>
-                <option value="windows">windows</option>
-                <option value="mac">macos</option>
-                <option value="linux">linux</option>
+            <label for="oem">Select Oem:</label>
+            <select id="oem" name="oem">
             </select><br>
             <label for="server">Select Server:</label>
             <select id="server" name="server" required>
             </select><br>
+            <label for="is_x64">x64:</label>
+            <input type="checkbox" id="is_x64" name="is_x64" checked><br>
             <label for="is_increment">Incremental:</label>
             <input type="checkbox" id="is_increment" name="is_increment"><br>
+            <label for="is_password">password manager:</label>
+            <input type="checkbox" id="is_password" name="is_password"><br>
             <label for="is_signed">Signed:</label>
             <input type="checkbox" id="is_signed" name="is_signed"><br>
             <button type="submit">Build Package</button>
@@ -208,25 +235,23 @@
 
         async function fetchServerList() {
             const baseUrl = window.location.origin;
-            const response = await fetch(`${baseUrl}/platform_cfg`);
+            const response = await fetch(`${baseUrl}/server_list`);
             const data = await response.json();
             const serverSelect = document.getElementById('server');
 
-            // 清空现有选项
             serverSelect.innerHTML = '';
 
-            // 动态填充服务器列表
             let firstServer = '';
             for (const platform in data) {
                 const optgroup = document.createElement('optgroup');
                 optgroup.label = platform.charAt(0).toUpperCase() + platform.slice(1);
                 data[platform].forEach(server => {
                     const option = document.createElement('option');
-                    option.value = server;
+                    option.value = platform + "-" + server;
                     option.textContent = server;
                     optgroup.appendChild(option);
-                    if (firstServer === '') {
-                        firstServer = server;
+                    if (firstServer === '' && option.value.length > 10) {
+                        firstServer = option.value;
                     }
                 });
                 serverSelect.appendChild(optgroup);
@@ -234,31 +259,58 @@
             serverSelect.value = firstServer;
         }
 
+        async function fetchOemList() {
+            const baseUrl = window.location.origin;
+            const response = await fetch(`${baseUrl}/oem_list`);
+            const data = await response.json();
+            const oemList = document.getElementById('oem');
+
+            data.forEach(oem => {
+                const option = document.createElement('option');
+                option.value = oem;
+                option.textContent = oem;
+                oemList.appendChild(option);
+            });
+
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
-            fetchTasks();
+            //fetchTasks();
             fetchServerList();
-            setInterval(fetchTasks, 3000);
+            fetchOemList();
+            //setInterval(fetchTasks, 3000);
         });
 
-        document.getElementById('buildPackageForm').addEventListener('submit', async function(event) {
+        document.getElementById('buildPackageForm').addEventListener('submit', async function (event) {
             event.preventDefault();
             const formData = new FormData(event.target);
             const branch = formData.get('branch');
             const commit_id = formData.get('commit_id');
-            let oem_name = formData.get('oem_name');
-            const platform = formData.get('platform');
-            const server = formData.get('server');
+            let oem_name = formData.get('oem');
+            const server_data = formData.get('server');
             const is_increment = formData.get('is_increment') === 'on';
             const is_signed = formData.get('is_signed') === 'on';
+            const is_x64 = formData.get('is_x64') === 'on';
+            const is_password = formData.get('is_password') === 'on';
+
+            let platform = '';
+            let server = '';
+            const server_parts = server_data.split('-');
+            if (server_parts.length === 2) {
+                platform = server_parts[0];
+                server = server_parts[1];
+            }
 
             const payload = {
                 branch: branch,
                 commit_id: commit_id,
-                oem_name: oem_name,
+                oem_name: oem_name.length == 0 ? oem_name : "current_xn_brand=" + oem_name,
                 platform: platform,
                 is_increment,
+                is_x64,
                 is_signed,
                 server,
+                password: is_password ? "enable_password_manager_extensions=true" : "",
             };
 
             try {
@@ -282,4 +334,5 @@
         });
     </script>
 </body>
+
 </html>

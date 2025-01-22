@@ -7,7 +7,6 @@ use svg::node::element::Path as SvgPath;
 use svg::node::Value;
 use svg::parser::Event;
 use svg::Document;
-use svgo::{SvgOptimizer};
 
 fn format_number(num: f32) -> String {
     if num.fract() == 0.0 {

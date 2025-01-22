@@ -25,9 +25,6 @@ use walkdir::WalkDir;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const OUT_DIR: &str = "out/Release";
-const OEM_KEY: &str = "current_xn_brand";
-
 #[cfg(target_os = "macos")]
 mod os {
     pub const SHELL: [&str; 2] = ["sh", "-C"];
@@ -88,15 +85,15 @@ WHERE id = ?
 pub struct PkgBuildRequest {
     branch: String,
     commit_id: Option<String>,
-    #[serde(default = "default_platform")]
+    is_x64: bool,
     platform: String,
-    #[serde(default = "default_is_64bit")]
-    is_64bit: bool,
     is_increment: bool,
     is_signed: bool,
     server: String,
-    oem_name: Option<String>,
+    oem_name: String,
+    password: String,
 }
+
 
 #[derive(Deserialize)]
 pub struct UpdateTaskRequest {
@@ -123,14 +120,6 @@ pub struct DeleteTaskRequest {
     task_id: i64,
 }
 
-fn default_is_64bit() -> bool {
-    true
-}
-
-fn default_platform() -> String {
-    "windows".to_string()
-}
-
 fn print_info(msg: &[u8]) {
     let stdout_str = String::from_utf8_lossy(msg);
     let stdout_trimmed = match stdout_str.find('[') {
@@ -140,15 +129,26 @@ fn print_info(msg: &[u8]) {
     println!("{}", stdout_trimmed);
 }
 
-pub async fn platform_cfg() -> impl IntoResponse {
+pub async fn server_list() -> impl IntoResponse {
     let mut file = File::open("config.toml").await.unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).await.unwrap();
 
     let config: toml::Value = toml::from_str(&contents).unwrap();
-    let server_config = serde_json::to_string(&config["server"]).unwrap();
+    let data  = serde_json::to_string(&config["server"]).unwrap();
 
-    (StatusCode::OK, server_config)
+    (StatusCode::OK, data)
+}
+
+pub async fn oem_list() -> impl IntoResponse {
+    let mut file = File::open("config.toml").await.unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await.unwrap();
+
+    let config: toml::Value = toml::from_str(&contents).unwrap();
+    let data = serde_json::to_string(&config["oem"]).unwrap();
+
+    (StatusCode::OK, data)
 }
 
 pub async fn delete_task(State(db_pool): State<SqlitePool>, Json(payload): Json<DeleteTaskRequest>) -> impl IntoResponse {
@@ -183,7 +183,7 @@ pub async fn delete_task(State(db_pool): State<SqlitePool>, Json(payload): Json<
     (StatusCode::OK, "Task deleted")
 }
 
-pub async fn tasklist(State(db_pool): State<SqlitePool>) -> impl IntoResponse {
+pub async fn task_list(State(db_pool): State<SqlitePool>) -> impl IntoResponse {
     let records: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(TASKLIST_QUERY)
         .fetch_all(&db_pool)
         .await
@@ -268,7 +268,7 @@ pub async fn build_package(
     println!("Branch: {}", payload.branch);
     println!("Commit ID: {:?}", payload.commit_id);
     println!("Platform: {}", payload.platform);
-    println!("Is 64-bit: {}", payload.is_64bit);
+    println!("Is x64: {}", payload.is_x64);
 
     let payload_clone = payload.clone();
     let db_pool_clone = db_pool.clone();
@@ -454,7 +454,7 @@ async fn backup(oem_name:&str, out_dir: &str, backup_dir: &str, installer:&str) 
         }
     }
 }
-async fn calc_installer_md5(pkg_path: &str) -> (String, String) {
+async fn calc_installer_md5(pkg_path: &str, extension: &str) -> (String, String) {
     let mut installer_file = String::new();
     let mut md5 = String::new();
     for entry in WalkDir::new(pkg_path).max_depth(1).into_iter().filter_map(|e| e.ok()) {
@@ -463,8 +463,8 @@ async fn calc_installer_md5(pkg_path: &str) -> (String, String) {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 let version_regex = Regex::new(r"\d+\.\d+\.\d+\.\d+").unwrap();
                 if version_regex.is_match(file_name) {
-                    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-                        if extension != "pdb" && extension != "dbg" && extension != "debug" {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if extension == ext {
                             installer_file = path.to_string_lossy().to_string();
                         }
                     }
@@ -487,54 +487,71 @@ async fn calc_installer_md5(pkg_path: &str) -> (String, String) {
             .unwrap()
             .to_string_lossy()
             .to_string(),
-        md5,
+        md5
     )
 }
-async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Result<()> {
-    let server_addr = payload.server.clone();
-    let task_id = add_task_state(
+
+
+async fn build_installer(src_path: &str, out_dir: &str, config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, x64: bool) -> anyhow::Result<()> {
+        update_task_state(
+            &server_addr,
+            task_id,
+            "",
+            "",
+            "",
+            "",
+            "build installer",
+            db_pool,
+        )
+        .await;
+        let mini_installer_command = format!("ninja -C {} {}", out_dir, os::INSTALLER_PROJECT);
+        let mut mini_installer_output = Command::new(os::SHELL[0])
+            .arg(os::SHELL[1])
+            .arg(&mini_installer_command)
+            .current_dir(&src_path)
+            .spawn()
+            .expect("failed to execute build installer command");
+        if !mini_installer_output.wait().unwrap().success() {
+            return Err(anyhow::anyhow!(task_id));
+        }
+
+    Ok(())
+}
+
+async fn build_project(src_path: &str, out_dir: &str, config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, x64: bool) -> anyhow::Result<()> {
+    update_task_state(
         &server_addr,
-        &payload.branch,
-        payload.oem_name.as_deref().unwrap_or(""),
-        payload.commit_id.as_deref().unwrap_or(""),
-        payload.is_increment,
-        payload.is_signed,
-        db_pool
-    ).await.unwrap_or(-1);
+        task_id,
+        "",
+        "",
+        "",
+        "",
+        "build pre_build",
+        db_pool,
+    )
+    .await;
+    let pre_build_command = format!("ninja -C {} pre_build", out_dir);
+    let mut pre_build_output = Command::new(os::SHELL[0])
+        .arg(os::SHELL[1])
+        .arg(&pre_build_command)
+        .current_dir(&src_path)
+        .spawn()
+        .expect("failed to execute pre_build command");
 
-    let _task = Task {
-        id: task_id,
-        branch_name: payload.branch.clone(),
-        start_time: "".to_string(),
-        end_time: "".to_string(),
-        is_signed: false,
-        md5: "".to_string(),
-        storage_path: "".to_string(),
-        installer: "".to_string(),
-        state: "".to_string(),
-        commit_id: payload.commit_id.clone().unwrap_or_default(),
-        is_increment: false,
-        oem_name: payload.oem_name.clone().unwrap_or_default(),
-        server: payload.server.clone(),
-    };
+    if !pre_build_output.wait().unwrap().success() {
+        return Err(anyhow::anyhow!(task_id));
+    }
 
-    update_task_state(&server_addr, task_id, "", "", "", "", "clean...", db_pool).await;
-
-    let mut file = File::open("config.toml")
-        .await
-        .expect("failed to open config file");
-
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).await.unwrap();
-    let config: toml::Value = toml::from_str(&contents).unwrap();
-    use std::path::Path;
-
-    let src_path = config["src"]["path"].as_str().unwrap();
-    println!("Source code path: {}", src_path);
-    let output_path = Path::new(src_path).join(OUT_DIR);
-
-    if !payload.is_increment {
-        let _ = std::fs::remove_dir_all(&output_path);
+    update_task_state(&server_addr, task_id, "", "", "", "", "build base", db_pool).await;
+    let base_build_command = format!("ninja -C {} base", out_dir);
+    let mut base_build_output = Command::new(os::SHELL[0])
+        .arg(os::SHELL[1])
+        .arg(&base_build_command)
+        .current_dir(&src_path)
+        .spawn()
+        .expect("failed to execute base build command");
+    if !base_build_output.wait().unwrap().success() {
+        return Err(anyhow::anyhow!(task_id));
     }
 
     update_task_state(
@@ -544,57 +561,29 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         "",
         "",
         "",
-        "checkout...",
+        "build chrome",
         db_pool,
     )
     .await;
-    update_code(src_path, &payload.branch, &payload.commit_id);
-
-    if let Some(clean) = config.get("clean") {
-        if let Some(path) = clean.get("path") {
-            for p in path.as_array().unwrap() {
-                let path = Path::new(src_path).join(p.as_str().unwrap());
-                if Path::new(&path).exists() {
-                    if path.is_file() {
-                        let _ = std::fs::remove_file(&path);
-                    } else {
-                        let _ = std::fs::remove_dir_all(&path);
-                    }
-                }
-            }
-        }
+    let chrome_build_command = format!("ninja -C {} chrome", out_dir);
+    let mut chrome_build_output = Command::new(os::SHELL[0])
+        .arg(os::SHELL[1])
+        .arg(&chrome_build_command)
+        .current_dir(&src_path)
+        .spawn()
+        .expect("failed to execute chrome build command");
+    
+    if !chrome_build_output.wait().unwrap().success() {
+        return Err(anyhow::anyhow!(task_id));
     }
 
-    let target_cpu = format!(
-        "target_cpu=\\\"{}\\\"",
-        if payload.is_64bit { "x64" } else { "x86" }
-    );
+    Ok(())
+}
 
-    let mut args = vec![
-        "is_debug=false",
-        "is_component_build=false",
-        "symbol_level=0",
-        "blink_symbol_level=0",
-        "v8_symbol_level=0",
-        "enable_nacl=false",
-        "is_clang=true",
-        &target_cpu,
-    ];
+async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, x64: bool) -> anyhow::Result<()> {
+    let mut args = vec![];
 
-
-    if let Some(custom_args) = config.get("custom_args") {
-        if let Some(oem_name) = &payload.oem_name {
-            if !oem_name.is_empty() {
-                if let Some(oem_key) = custom_args.get("oem_key") {
-                    let oem_key_str = oem_key.as_str().unwrap();
-                    let oem_args = format!("{}=\\\"{}\\\"", oem_key_str, oem_name);
-                    args.push(Box::leak(oem_args.into_boxed_str()));
-                } else {
-                    let oem_args = format!("{}=\\\"{}\\\"", OEM_KEY, oem_name);
-                    args.push(Box::leak(oem_args.into_boxed_str()));
-                }
-            }
-        }
+    if let Some(custom_args) = config.get("gn_default_args") {
         if let Some(spec_args) = custom_args.get(std::env::consts::OS) {
             for arg in spec_args.as_array().unwrap() {
                 if !arg.as_str().unwrap().is_empty() {
@@ -602,6 +591,25 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
                 }
             }
         }
+    }
+
+    let target_cpu = format!(
+        "target_cpu=\\\"{}\\\"",
+        if x64 { "x64" } else { "x86" }
+    );
+    args.push(&target_cpu);
+    
+    #[warn(unused_assignments)]
+    let mut oem_arg = "".to_string();
+    if !payload.oem_name.is_empty() {
+        let prefix = payload.oem_name.split('=').nth(0).unwrap_or("current_xn_brand");
+        let oem = payload.oem_name.split('=').nth(1).unwrap_or("normal");
+        oem_arg = format!("{}=\\\"{}\\\"", prefix, oem);
+        args.push(&oem_arg);
+    }
+
+    if payload.password.is_empty() {
+        args.push(&payload.password);
     }
 
     update_task_state(
@@ -625,7 +633,7 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
     let gn_args = &[
         "gn",
         "gen",
-        OUT_DIR,
+        out_dir,
         &format!("--args=\"{}\"", args.join(" ")),
         ide_args,
     ];
@@ -661,6 +669,53 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         print_info(&gn_output.stdout);
         return Err(anyhow::anyhow!(task_id));
     }
+    Ok(())
+}
+async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Result<()> {
+    let server_addr = payload.server.clone();
+    let task_id = add_task_state(
+        &server_addr,
+        &payload.branch,
+        &payload.oem_name,
+        payload.commit_id.as_deref().unwrap_or(""),
+        payload.is_increment,
+        payload.is_signed,
+        db_pool
+    ).await.unwrap_or(-1);
+
+    let _task = Task {
+        id: task_id,
+        branch_name: payload.branch.clone(),
+        start_time: "".to_string(),
+        end_time: "".to_string(),
+        is_signed: false,
+        md5: "".to_string(),
+        storage_path: "".to_string(),
+        installer: "".to_string(),
+        state: "".to_string(),
+        commit_id: payload.commit_id.clone().unwrap_or_default(),
+        is_increment: false,
+        oem_name: payload.oem_name.clone(),
+        server: payload.server.clone(),
+    };
+
+    update_task_state(&server_addr, task_id, "", "", "", "", "clean...", db_pool).await;
+
+    let mut file = File::open("config.toml")
+        .await
+        .expect("failed to open config file");
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await.unwrap();
+    let config: toml::Value = toml::from_str(&contents).unwrap();
+    use std::path::Path;
+
+    let src_path = config["src"]["path"].as_str().unwrap();
+    // println!("Source code path: {}", src_path);
+
+    // if !payload.is_increment {
+    //     let _ = std::fs::remove_dir_all(&output_path);
+    // }
 
     update_task_state(
         &server_addr,
@@ -669,117 +724,152 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         "",
         "",
         "",
-        "build pre_build",
+        "checkout...",
         db_pool,
     )
     .await;
-    let pre_build_command = format!("ninja -C {} pre_build", OUT_DIR);
-    let mut pre_build_output = Command::new(os::SHELL[0])
-        .arg(os::SHELL[1])
-        .arg(&pre_build_command)
-        .current_dir(&src_path)
-        .spawn()
-        .expect("failed to execute pre_build command");
+    update_code(src_path, &payload.branch, &payload.commit_id);
 
-    if !pre_build_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
-    }
-
-    update_task_state(&server_addr, task_id, "", "", "", "", "build base", db_pool).await;
-    let base_build_command = format!("ninja -C {} base", OUT_DIR);
-    let mut base_build_output = Command::new(os::SHELL[0])
-        .arg(os::SHELL[1])
-        .arg(&base_build_command)
-        .current_dir(&src_path)
-        .spawn()
-        .expect("failed to execute base build command");
-    if !base_build_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
-    }
-
-    update_task_state(
-        &server_addr,
-        task_id,
-        "",
-        "",
-        "",
-        "",
-        "build chrome",
-        db_pool,
-    )
-    .await;
-    let chrome_build_command = format!("ninja -C {} chrome", OUT_DIR);
-    let mut chrome_build_output = Command::new(os::SHELL[0])
-        .arg(os::SHELL[1])
-        .arg(&chrome_build_command)
-        .current_dir(&src_path)
-        .spawn()
-        .expect("failed to execute chrome build command");
-    
-    if !chrome_build_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
-    }
-
-    update_task_state(
-        &server_addr,
-        task_id,
-        "",
-        "",
-        "",
-        "",
-        "build installer",
-        db_pool,
-    )
-    .await;
-    let mini_installer_command = format!("ninja -C {} {}", OUT_DIR, os::INSTALLER_PROJECT);
-    let mut mini_installer_output = Command::new(os::SHELL[0])
-        .arg(os::SHELL[1])
-        .arg(&mini_installer_command)
-        .current_dir(&src_path)
-        .spawn()
-        .expect("failed to execute build installer command");
-    if !mini_installer_output.wait().unwrap().success() {
-        return Err(anyhow::anyhow!(task_id));
-    }
-
-    let (installer, md5) = calc_installer_md5(output_path.to_str().unwrap()).await;
-
-    update_task_state(
-        &server_addr,
-        task_id,
-        "",
-        &md5,
-        "",
-        &installer,
-        "backup",
-        db_pool,
-    )
-    .await;
-
-    if let Some(backup_path) = config.get("backup_path") {
-        if let Some(path) = backup_path.get(std::env::consts::OS) {
-            let backup_dir = path.as_str().unwrap_or_default();
-            if !backup_dir.is_empty() {
-                let date_subfolder = chrono::Local::now().format("%Y-%m-%d-%H-%M").to_string();
-                let date_dir = Path::new(backup_dir).join(&date_subfolder);
-                fs::create_dir_all(&date_dir).await.unwrap();
-                let end_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                update_task_state(
-                    &server_addr,
-                    task_id,
-                    &end_time,
-                    &md5,
-                    date_dir.to_str().unwrap(),
-                    &installer,
-                    "success",
-                    db_pool,
-                )
-                .await;
-                backup(payload.oem_name.as_deref().unwrap_or(""), output_path.to_str().unwrap(), date_dir.to_str().unwrap(), &installer).await;
+    if let Some(clean) = config.get("clean") {
+        if let Some(path) = clean.get("path") {
+            for p in path.as_array().unwrap() {
+                let path = Path::new(src_path).join(p.as_str().unwrap());
+                if Path::new(&path).exists() {
+                    if path.is_file() {
+                        let _ = std::fs::remove_file(&path);
+                    } else {
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                }
             }
-
         }
     }
+
+    let oem = payload.oem_name.split('=').nth(1).unwrap_or("default").to_string();
+
+    if cfg!(target_os = "macos") {
+        let out_dir_64 = format!("out/{}_x64", oem);
+        make_project(src_path, &out_dir_64, config.clone(),&server_addr,task_id,payload, db_pool, false).await?;
+        build_project(src_path, &out_dir_64, config.clone(), &server_addr, task_id, payload, db_pool, true).await?;
+        let out_dir = format!("out/{}", oem);
+        make_project(src_path, &out_dir, config.clone(),&server_addr,task_id,payload, db_pool, true).await?;
+        build_project(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, false).await?;
+        let pkg = format!("{}/{} Browser.app", out_dir, payload.oem_name);
+        let pkg_64 = format!("{}/{} Browser.app", out_dir_64, payload.oem_name);
+        let pkg_target_dir = format!("out/release_universalizer_{}/", payload.oem_name);
+        let pkg_target = format!("{}/{} Browser.app", pkg_target_dir, payload.oem_name);
+        let universalizer_command = format!("python3 chrome/installer/mac/universalizer.py {} {} {}", pkg, pkg_64, pkg_target);
+        let mut universalizer_output = Command::new(os::SHELL[0])
+            .arg(os::SHELL[1])
+            .arg(&universalizer_command)
+            .current_dir(&src_path)
+            .spawn()
+            .expect("failed to execute universalizer command");
+        if !universalizer_output.wait().unwrap().success() {
+            println!("universalizer failed");
+            return Err(anyhow::anyhow!(task_id));
+        }
+        //压缩pkg_target
+        let pkg_target_zip = format!("{}.zip", pkg_target);
+        let zip_command = format!("zip -r -j {} {}", pkg_target_zip, pkg_target);
+        let mut zip_output = Command::new(os::SHELL[0])
+            .arg(os::SHELL[1])
+            .arg(&zip_command)
+            .current_dir(&src_path)
+            .spawn()
+            .expect("failed to execute zip command");
+        if !zip_output.wait().unwrap().success() {
+            println!("zip failed");
+            return Err(anyhow::anyhow!(task_id));
+        }
+
+        let sign_command = format!("sign_client {} {}", pkg_target_zip, payload.oem_name);
+        let mut sign_output = Command::new(os::SHELL[0])
+            .arg(os::SHELL[1])
+            .arg(&sign_command)
+            .current_dir(&src_path)
+            .spawn()
+            .expect("failed to execute sign command");
+
+        if !sign_output.wait().unwrap().success() {
+            println!("sign failed");
+            return Err(anyhow::anyhow!(task_id));
+        }
+        let backup_path = config["backup_path"].as_str().unwrap_or_default();
+        backup(&payload.oem_name, &pkg_target_dir, &backup_path, &pkg_target_zip).await;
+    }
+    else {
+        let out_dir: String = format!("out/{}{}", oem, if payload.is_x64 { "_x64" } else { "" });
+        make_project(src_path, &out_dir, config.clone(),&server_addr,task_id,payload, db_pool, payload.is_x64).await?;
+        build_project(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, payload.is_x64).await?;
+        build_installer(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, payload.is_x64).await?;
+        if cfg!(target_os = "linux") {
+            let (installer_deb, _md5_deb) = calc_installer_md5(&out_dir, "deb").await;
+            let (installer_rpm, _md5_rpm) = calc_installer_md5(&out_dir, "rpm").await;
+            let pkg_target_deb_zip = format!("{}.zip", installer_deb);
+            let pkg_target_rpm_zip = format!("{}.zip", installer_rpm);
+            let zip_command_deb = format!("zip -r -j {} {}", pkg_target_deb_zip, installer_deb);
+            let mut zip_output = Command::new(os::SHELL[0])
+                .arg(os::SHELL[1])
+                .arg(&zip_command_deb)
+                .current_dir(&src_path)
+                .spawn()
+                .expect("failed to execute zip command");
+            if !zip_output.wait().unwrap().success() {
+                println!("zip failed");
+                return Err(anyhow::anyhow!(task_id));
+            }
+            let zip_command_rpm = format!("zip -r -j {} {}", pkg_target_rpm_zip, installer_rpm);
+            let mut zip_output = Command::new(os::SHELL[0])
+                .arg(os::SHELL[1])
+                .arg(&zip_command_rpm)
+                .current_dir(&src_path)
+                .spawn()
+                .expect("failed to execute zip command");
+            if !zip_output.wait().unwrap().success() {
+                println!("zip failed");
+                return Err(anyhow::anyhow!(task_id));
+            }
+        }
+        else {
+            let (installer, md5) = calc_installer_md5(&out_dir, "exe").await;
+            update_task_state(
+                &server_addr,
+                task_id,
+                "",
+                &md5,
+                "",
+                &installer,
+                "backup",
+                db_pool,
+            )
+            .await;
+            if let Some(backup_path) = config.get("backup_path") {
+                if let Some(path) = backup_path.get(std::env::consts::OS) {
+                    let backup_dir = path.as_str().unwrap_or_default();
+                    if !backup_dir.is_empty() {
+                        let date_subfolder = chrono::Local::now().format("%Y-%m-%d-%H-%M").to_string();
+                        let date_dir = Path::new(backup_dir).join(&date_subfolder);
+                        fs::create_dir_all(&date_dir).await.unwrap();
+                        let end_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                        update_task_state(
+                            &server_addr,
+                            task_id,
+                            &end_time,
+                            &md5,
+                            date_dir.to_str().unwrap(),
+                            &installer,
+                            "success",
+                            db_pool,
+                        )
+                        .await;
+                        backup(&payload.oem_name, &out_dir, date_dir.to_str().unwrap(), &installer).await;
+                    }
+                }
+            }
+        }
+    }
+
     println!("Task {} finished", task_id);
 
     Ok(())

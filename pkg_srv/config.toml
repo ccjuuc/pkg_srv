@@ -1,9 +1,20 @@
+clean_path = [
+  "snow_overrides/brand_overrides",
+  "out/Release/gen/snow_overrides/build",
+]
+
+oem = [
+  "normal",
+  "nuctech",
+  ""
+]
+
 [git]
 addr = "ssh://10.0.10.15:29418/108.0.5359.215"
 user = "shangzhij"
 
 [src]
-path = "E:/snow_commit/src"
+path = "G:/snow_108_pkg/108.0.5359.215"
 db = "backup.db"
 
 [dev_tools]
@@ -11,21 +22,31 @@ windows = "E:/snow_commit/dev_tools"
 linux = "/home/snow_commit/dev_tools"
 macos = "/Users/snow_commit/dev_tools"
 
-[clean]
-path = ["snow_overrides/brand_overrides", "out/Release/gen/snow_overrides/build"]
-
 [backup_path]
 windows = "E:/snow_commit/backup"
 linux = "/home/snow_commit/backup"
 macos = "/Users/snow_commit/backup"
 
 [server]
-windows = ["10.0.10.14:3000", "10.0.10.14:3001"]
-linux = [""]
+windows = ["localhost:3000","10.0.10.14:3000", "10.0.10.14:3001"]
 macos = [""]
 
-[custom_args]
-oem_key = "current_xn_brand"
-windows = ["enable_password_manager_extensions=true","is_official_build=true"]
-linux = ["enable_password_manager_extensions=true","grpc_use_static_linking=true","is_official_build=true", "use_large_pdbs=true"]
+[gn_default_args]
+windows = [
+  "enable_password_manager_extensions=true",
+  "is_debug=false",
+  "is_component_build=false",
+  "symbol_level=0",
+  "blink_symbol_level=0",
+  "v8_symbol_level=0",
+  "enable_nacl=false",
+  "is_clang=true",
+  "is_official_build=true"
+]
+linux = [
+  "enable_password_manager_extensions=true",
+  "grpc_use_static_linking=true",
+  "is_official_build=true",
+  "use_large_pdbs=true",
+]
 macos = ["use_system_xcode=true"]
