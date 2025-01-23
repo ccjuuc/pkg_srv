@@ -185,17 +185,21 @@
                 console.log(task);
 
                 const installerCell = row.insertCell();
-                console.log(task.installer);
-                const installers = JSON.parse(task.installer);
-                installers.forEach(installer => {
-                    console.log(installer);
-                    const installerLink = document.createElement('a');
-                    installerLink.href = `http://${task.server}/download/${installer[0]}`;
-                    installerLink.textContent = `${installer[0]} ${installer[1]}`;
-                    installerLink.target = "_blank";
-                    installerCell.appendChild(installerLink);
-                    installerCell.appendChild(document.createElement('br'));
-                });
+                if (task.installer === null) {
+                    installerCell.textContent = "";
+                } else {
+                    console.log(task.installer);
+                    const installers = JSON.parse(task.installer);
+                    installers.forEach(installer => {
+                        console.log(installer);
+                        const installerLink = document.createElement('a');
+                        installerLink.href = `http://${task.server}/download/${installer[0]}`;
+                        installerLink.textContent = `${installer[0]} ${installer[1]}`;
+                        installerLink.target = "_blank";
+                        installerCell.appendChild(installerLink);
+                        installerCell.appendChild(document.createElement('br'));
+                    });
+                }
 
                 row.insertCell().textContent = task.state;
 

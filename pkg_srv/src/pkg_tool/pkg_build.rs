@@ -805,6 +805,10 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         let pkg = format!("{}/{} Browser.app", out_dir, payload.oem_name);
         let pkg_64 = format!("{}/{} Browser.app", out_dir_64, payload.oem_name);
         let pkg_target_dir = format!("out/release_universalizer_{}/", payload.oem_name);
+        if Path::new(&pkg_target_dir).exists() {
+            let _ = fs::remove_dir_all(&pkg_target_dir).await;
+        }
+        fs::create_dir_all(&pkg_target_dir).await?;
         let pkg_target = format!("{}/{} Browser.app", pkg_target_dir, payload.oem_name);
         let universalizer_command = format!("python3 chrome/installer/mac/universalizer.py {} {} {}", pkg, pkg_64, pkg_target);
         let mut universalizer_output = Command::new(os::SHELL[0])
