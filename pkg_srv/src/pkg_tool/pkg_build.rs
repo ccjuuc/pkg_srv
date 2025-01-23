@@ -255,8 +255,21 @@ pub async fn build_package(
 
     let config: toml::Value = toml::from_str(&contents).unwrap();
 
-    let src_path = config["src"]["path"].as_str().unwrap();
-    println!("Source code path: {}", src_path);
+    let src_path = {
+            if let Some(custom_args) = config.get("src") {
+                if let Some(src) = custom_args.get(std::env::consts::OS) {
+                    src.as_str().unwrap()
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            }
+        };
+
+    if src_path.is_empty() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Source code path not found");
+    }
 
     println!("Branch: {}", payload.branch);
     println!("Commit ID: {:?}", payload.commit_id);
