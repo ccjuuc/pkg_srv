@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Output;
 use std::{env, vec};
@@ -43,7 +44,7 @@ mod os {
 mod os {
     pub const SHELL: [&str; 2] = ["cmd.exe", "/c"];
     pub const IDE: &str = "vs2022";
-    pub const INSTALLER_PROJECT: &str = "mini_installer";
+    pub const INSTALLER_PROJECT: &str = "installer_with_sign";
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -56,7 +57,6 @@ struct Task {
     commit_id: String,
     is_signed: bool,
     is_increment: bool,
-    md5: String,
     storage_path: String,
     installer: String,
     state: String,
@@ -64,7 +64,7 @@ struct Task {
 }
 
 const TASKLIST_QUERY: &str = r#"
-  SELECT id, start_time, branch_name, end_time, oem_name, commit_id, is_signed, is_increment, md5, storage_path,installer, state, server
+  SELECT id, start_time, branch_name, end_time, oem_name, commit_id, is_signed, is_increment, storage_path,installer, state, server
   FROM pkg
   ORDER BY id DESC
 "#;
@@ -77,7 +77,7 @@ RETURNING id
 
 const UPDATE_TASK: &str = r#"
 UPDATE pkg
-SET end_time = ?, md5 = ?, storage_path = ?, installer = ?, state = ?
+SET end_time = ?, storage_path = ?, installer = ?, state = ?
 WHERE id = ?
 "#;
 
@@ -99,7 +99,6 @@ pub struct PkgBuildRequest {
 pub struct UpdateTaskRequest {
     id: i64,
     end_time: String,
-    md5: String,
     storage_path: String,
     installer: String,
     state: String,
@@ -173,8 +172,7 @@ pub async fn delete_task(State(db_pool): State<SqlitePool>, Json(payload): Json<
     .execute(&db_pool)
     .await
     {
-        Ok(_) => {
-        }
+        Ok(_) => {}
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete task".into()),
     }
 
@@ -197,7 +195,6 @@ pub async fn task_list(State(db_pool): State<SqlitePool>) -> impl IntoResponse {
             start_time: row.get::<String, _>("start_time"),
             end_time: row.get("end_time"),
             is_signed: row.get("is_signed"),
-            md5: row.get("md5"),
             storage_path: row.get("storage_path"),
             installer: row.get("installer"),
             state: row.get("state"),
@@ -281,7 +278,6 @@ pub async fn build_package(
                 "",
                 "",
                 "",
-                "",
                 "failed",
                 &db_pool_clone,
             )
@@ -331,7 +327,6 @@ pub async fn update_task(
         "local",
         payload.id,
         &payload.end_time,
-        &payload.md5,
         &payload.storage_path,
         &payload.installer,
         &payload.state,
@@ -402,7 +397,6 @@ async fn update_task_state(
     server: &str,
     task_id: i64,
     end_time: &str,
-    md5: &str,
     store_path: &str,
     installer: &str,
     state: &str,
@@ -411,7 +405,6 @@ async fn update_task_state(
     if !db_pool.is_closed() {
         sqlx::query(UPDATE_TASK)
             .bind(&end_time)
-            .bind(&md5)
             .bind(&store_path)
             .bind(&installer)
             .bind(&state)
@@ -426,7 +419,6 @@ async fn update_task_state(
             .json(&serde_json::json!({
                 "task_id": task_id,
                 "end_time": end_time,
-                "md5": md5,
                 "store_path": store_path,
                 "installer": installer,
                 "state": state,
@@ -437,35 +429,81 @@ async fn update_task_state(
     }
 }
 
-async fn backup(oem_name:&str, out_dir: &str, backup_dir: &str, installer:&str) {
-    let _ = fs::copy(&Path::new(out_dir).join(installer), Path::new(backup_dir).join(installer)).await;
-    for entry in WalkDir::new(out_dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+async fn copy_debug_files(data_dir: &Path, backup_dir: &Path, oem: &str) -> anyhow::Result<()> {
+    for entry in WalkDir::new(data_dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let file_name = entry.file_name().to_string_lossy().to_string();
             let file_name_lower = file_name.to_lowercase();
-            let oem_name_fix = if oem_name.is_empty() || oem_name == "normal" { "snow" } else { oem_name };
-            let oem_name_lower = oem_name_fix.to_lowercase();
             if file_name.ends_with(".pdb") || file_name.ends_with(".dbg") || file_name.ends_with(".debug") {
-                if !oem_name.is_empty() && file_name_lower.contains(&oem_name_lower) {
-                    let _ = fs::copy(entry.path(), Path::new(backup_dir).join(file_name)).await;
-                    continue;
+                if file_name_lower.contains(oem) {
+                    fs::copy(entry.path(), backup_dir.join(file_name)).await?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::Value, server_addr: &str, task_id: i64, db_pool: &SqlitePool, oem: &str, installer: HashMap<&str,&str>,installer_64: HashMap<&str,&str>) -> anyhow::Result<()> {
+    if let Some(backup_path) = config.get("backup_path") {
+        if let Some(path) = backup_path.get(std::env::consts::OS) {
+            let backup_dir = path.as_str().unwrap_or_default();
+            if !backup_dir.is_empty() {
+                let date_subfolder = chrono::Local::now().format("%Y-%m-%d-%H-%M").to_string();
+                let date_dir = Path::new(backup_dir).join(&date_subfolder);
+                fs::create_dir_all(&date_dir).await.unwrap();
+                let end_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+                let dst= Path::new(src_path).join(out_dir);
+                let backup_subfolder = Path::new(backup_dir).join(oem);
+                for (installer, _) in installer.iter() {
+                    let _ = fs::copy(&dst.join(installer), Path::new(backup_dir).join(installer)).await;
+                }
+                let dst_64 = Path::new(src_path).join(out_dir_64);
+                let backup_subfolder_64 = Path::new(backup_dir).join(format!("{}_x64", oem));
+                for (installer, _) in installer_64.iter() {
+                    let _ = fs::copy(&dst_64.join(installer), Path::new(backup_dir).join(installer)).await;
+                }
+
+                let mut installer = installer.clone();
+                installer.extend(installer_64);
+                let installer_vec: Vec<(String, String)> = installer.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                let installer_json = serde_json::to_string(&installer_vec).unwrap();
+
+                update_task_state(
+                    &server_addr,
+                    task_id,
+                    &end_time,
+                    date_dir.to_str().unwrap(),
+                    &installer_json,
+                    "success",
+                    db_pool,
+                )
+                .await;
+                
+                if !oem.is_empty() {
+                    copy_debug_files(&dst, &backup_subfolder, oem).await?;
+                    copy_debug_files(&dst_64, &backup_subfolder_64, oem).await?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 async fn calc_installer_md5(pkg_path: &str, extension: &str) -> (String, String) {
-    let mut installer_file = String::new();
+    let mut installer_file = pkg_path.to_string();
     let mut md5 = String::new();
-    for entry in WalkDir::new(pkg_path).max_depth(1).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                let version_regex = Regex::new(r"\d+\.\d+\.\d+\.\d+").unwrap();
-                if version_regex.is_match(file_name) {
-                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                        if extension == ext {
-                            installer_file = path.to_string_lossy().to_string();
+    if Path::new(pkg_path).is_dir() {
+        for entry in WalkDir::new(pkg_path).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    let version_regex = Regex::new(r"\d+\.\d+\.\d+\.\d+").unwrap();
+                    if version_regex.is_match(file_name) {
+                        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                            if extension == ext {
+                                installer_file = path.to_string_lossy().to_string();
+                            }
                         }
                     }
                 }
@@ -499,7 +537,6 @@ async fn build_installer(src_path: &str, out_dir: &str, _config: toml::Value, se
             "",
             "",
             "",
-            "",
             "build installer",
             db_pool,
         )
@@ -526,7 +563,6 @@ async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, serv
         "",
         "",
         "",
-        "",
         "build pre_build",
         db_pool,
     )
@@ -544,7 +580,7 @@ async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, serv
         return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, pre_build_command)));
     }
 
-    update_task_state(&server_addr, task_id, "", "", "", "", "build base", db_pool).await;
+    update_task_state(&server_addr, task_id, "", "", "", "build base", db_pool).await;
     let base_build_command = format!("ninja -C {} base", out_dir);
     let mut base_build_output = Command::new(os::SHELL[0])
         .arg(os::SHELL[1])
@@ -560,7 +596,6 @@ async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, serv
     update_task_state(
         &server_addr,
         task_id,
-        "",
         "",
         "",
         "",
@@ -620,7 +655,6 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
     update_task_state(
         &server_addr,
         task_id,
-        "",
         "",
         "",
         "",
@@ -688,7 +722,6 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         start_time: "".to_string(),
         end_time: "".to_string(),
         is_signed: false,
-        md5: "".to_string(),
         storage_path: "".to_string(),
         installer: "".to_string(),
         state: "".to_string(),
@@ -698,7 +731,7 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         server: payload.server.clone(),
     };
 
-    update_task_state(&server_addr, task_id, "", "", "", "", "clean...", db_pool).await;
+    update_task_state(&server_addr, task_id, "", "", "", "clean...", db_pool).await;
 
     let mut file = File::open("config.toml")
         .await
@@ -719,7 +752,6 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
     update_task_state(
         &server_addr,
         task_id,
-        "",
         "",
         "",
         "",
@@ -794,17 +826,21 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
             println!("sign failed");
             return Err(anyhow::anyhow!(task_id));
         }
-        let backup_path = config["backup_path"].as_str().unwrap_or_default();
-        backup(&payload.oem_name, &pkg_target_dir, &backup_path, &pkg_target_zip).await;
+
+        let (installer, md5) = calc_installer_md5(&pkg_target_zip, "zip").await;
+        let mut installer_map = HashMap::new();
+        installer_map.insert(installer.as_str(), md5.as_str());
+        backup(src_path, out_dir.as_str(), out_dir_64.as_str(), config.clone(), &server_addr, task_id, db_pool, &oem, installer_map, HashMap::new()).await?;
     }
     else {
         let out_dir: String = format!("out/{}{}", oem, if payload.is_x64 { "_x64" } else { "" });
+        let dst = Path::new(src_path).join(&out_dir);
         make_project(src_path, &out_dir, config.clone(),&server_addr,task_id,payload, db_pool, payload.is_x64).await?;
         build_project(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, payload.is_x64).await?;
         build_installer(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, payload.is_x64).await?;
         if cfg!(target_os = "linux") {
-            let (installer_deb, _md5_deb) = calc_installer_md5(&out_dir, "deb").await;
-            let (installer_rpm, _md5_rpm) = calc_installer_md5(&out_dir, "rpm").await;
+            let (installer_deb, md5_deb) = calc_installer_md5(dst.to_str().unwrap(), "deb").await;
+            let (installer_rpm, md5_rpm) = calc_installer_md5(dst.to_str().unwrap(), "rpm").await;
             let pkg_target_deb_zip = format!("{}.zip", installer_deb);
             let pkg_target_rpm_zip = format!("{}.zip", installer_rpm);
             let zip_command_deb = format!("zip -r -j {} {}", pkg_target_deb_zip, installer_deb);
@@ -829,43 +865,17 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
                 println!("zip failed");
                 return Err(anyhow::anyhow!(task_id));
             }
+
+            let mut installer = HashMap::new(); 
+            installer.insert(installer_deb.as_str(), md5_deb.as_str());
+            installer.insert(installer_rpm.as_str(), md5_rpm.as_str());
+            backup(src_path, out_dir.as_str(), "", config.clone(), &server_addr, task_id, db_pool, &oem, installer, HashMap::new()).await?;
         }
         else {
-            let (installer, md5) = calc_installer_md5(&out_dir, "exe").await;
-            update_task_state(
-                &server_addr,
-                task_id,
-                "",
-                &md5,
-                "",
-                &installer,
-                "backup",
-                db_pool,
-            )
-            .await;
-            if let Some(backup_path) = config.get("backup_path") {
-                if let Some(path) = backup_path.get(std::env::consts::OS) {
-                    let backup_dir = path.as_str().unwrap_or_default();
-                    if !backup_dir.is_empty() {
-                        let date_subfolder = chrono::Local::now().format("%Y-%m-%d-%H-%M").to_string();
-                        let date_dir = Path::new(backup_dir).join(&date_subfolder);
-                        fs::create_dir_all(&date_dir).await.unwrap();
-                        let end_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                        update_task_state(
-                            &server_addr,
-                            task_id,
-                            &end_time,
-                            &md5,
-                            date_dir.to_str().unwrap(),
-                            &installer,
-                            "success",
-                            db_pool,
-                        )
-                        .await;
-                        backup(&payload.oem_name, &out_dir, date_dir.to_str().unwrap(), &installer).await;
-                    }
-                }
-            }
+            let (installer, md5) = calc_installer_md5(dst.to_str().unwrap(), "exe").await;
+            let mut installer_map = HashMap::new();
+            installer_map.insert(installer.as_str(), md5.as_str());
+            backup(src_path, out_dir.as_str(), "", config.clone(), &server_addr, task_id, db_pool, &oem, installer_map, HashMap::new()).await?;
         }
     }
 
@@ -940,7 +950,6 @@ pub async fn init_db() -> anyhow::Result<sqlx::SqlitePool> {
             commit_id TEXT,
             is_signed BOOLEAN,
             is_increment BOOLEAN,
-            md5 TEXT,
             storage_path TEXT,
             installer TEXT,
             state TEXT,

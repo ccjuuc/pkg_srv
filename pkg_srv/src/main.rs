@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/add_rounded_corners", post(oem_tool::oem_srv::add_rounded_corners))
         .route("/server_list", get(pkg_tool::pkg_build::server_list))
         .route("/oem_list", get(pkg_tool::pkg_build::oem_list))
-        .route("/task_list", post(pkg_tool::pkg_build::task_list))
+        .route("/task_list", get(pkg_tool::pkg_build::task_list))
         .route("/add_task", post(pkg_tool::pkg_build::add_task))
         .route("/update_task", post(pkg_tool::pkg_build::update_task))
         .route("/build_package", post(pkg_tool::pkg_build::build_package))

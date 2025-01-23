@@ -135,7 +135,6 @@
                 <th>Commit ID</th>
                 <th>Is Signed</th>
                 <th>Is Increment</th>
-                <th>MD5</th>
                 <th>Installer</th>
                 <th>State</th>
                 <th>Action</th>
@@ -161,13 +160,7 @@
         async function fetchTasks() {
             const baseUrl = window.location.origin;
             try {
-                const response = await fetch(`${baseUrl}/tasklist`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({})
-                });
+                const response = await fetch(`${baseUrl}/task_list`);
                 const data = await response.json();
                 updateTaskTable(data.tasks);
             } catch (error) {
@@ -189,14 +182,20 @@
                 row.insertCell().textContent = task.commit_id;
                 row.insertCell().textContent = task.is_signed;
                 row.insertCell().textContent = task.is_increment;
-                row.insertCell().textContent = task.md5;
+                console.log(task);
 
                 const installerCell = row.insertCell();
-                const installerLink = document.createElement('a');
-                installerLink.href = `http://${task.server}/download/${task.storage_path}/${task.installer}`;
-                installerLink.textContent = task.installer;
-                installerLink.target = "_blank";
-                installerCell.appendChild(installerLink);
+                console.log(task.installer);
+                const installers = JSON.parse(task.installer);
+                installers.forEach(installer => {
+                    console.log(installer);
+                    const installerLink = document.createElement('a');
+                    installerLink.href = `http://${task.server}/download/${installer[0]}`;
+                    installerLink.textContent = `${installer[0]} ${installer[1]}`;
+                    installerLink.target = "_blank";
+                    installerCell.appendChild(installerLink);
+                    installerCell.appendChild(document.createElement('br'));
+                });
 
                 row.insertCell().textContent = task.state;
 
@@ -275,10 +274,10 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
-            //fetchTasks();
+            fetchTasks();
             fetchServerList();
             fetchOemList();
-            //setInterval(fetchTasks, 3000);
+            setInterval(fetchTasks, 3000);
         });
 
         document.getElementById('buildPackageForm').addEventListener('submit', async function (event) {
