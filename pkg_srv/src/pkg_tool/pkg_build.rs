@@ -430,6 +430,9 @@ async fn update_task_state(
 }
 
 async fn copy_debug_files(data_dir: &Path, backup_dir: &Path, oem: &str) -> anyhow::Result<()> {
+    if !backup_dir.exists() {
+        fs::create_dir_all(&backup_dir).await.unwrap();
+    }
     for entry in WalkDir::new(data_dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let file_name = entry.file_name().to_string_lossy().to_string();
@@ -455,14 +458,16 @@ async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::V
                 let end_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
                 let dst= Path::new(src_path).join(out_dir);
-                let backup_subfolder = Path::new(backup_dir).join(oem);
+                let backup_subfolder = date_dir.join(oem);
+
                 for (installer, _) in installer.iter() {
-                    let _ = fs::copy(&dst.join(installer), Path::new(backup_dir).join(installer)).await;
+                    let _ = fs::copy(&dst.join(installer), date_dir.join(installer)).await;
                 }
                 let dst_64 = Path::new(src_path).join(out_dir_64);
-                let backup_subfolder_64 = Path::new(backup_dir).join(format!("{}_x64", oem));
+                let backup_subfolder_64 = date_dir.join(format!("{}_x64", oem));
+
                 for (installer, _) in installer_64.iter() {
-                    let _ = fs::copy(&dst_64.join(installer), Path::new(backup_dir).join(installer)).await;
+                    let _ = fs::copy(&dst_64.join(installer), date_dir.join(installer)).await;
                 }
 
                 let mut installer = installer.clone();
@@ -482,8 +487,12 @@ async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::V
                 .await;
                 
                 if !oem.is_empty() {
-                    copy_debug_files(&dst, &backup_subfolder, oem).await?;
-                    copy_debug_files(&dst_64, &backup_subfolder_64, oem).await?;
+                    if !out_dir.is_empty() {
+                        copy_debug_files(&dst, &backup_subfolder, oem).await?;
+                    }
+                    if !out_dir_64.is_empty() {
+                        copy_debug_files(&dst_64, &backup_subfolder_64, oem).await?;
+                    }
                 }
             }
         }
@@ -706,10 +715,11 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
 }
 async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Result<()> {
     let server_addr = payload.server.clone();
+    let oem = payload.oem_name.split('=').nth(1).unwrap_or("default").to_string();
     let task_id = add_task_state(
         &server_addr,
         &payload.branch,
-        &payload.oem_name,
+        &oem,
         payload.commit_id.as_deref().unwrap_or(""),
         payload.is_increment,
         payload.is_signed,
@@ -775,8 +785,6 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
             }
         }
     }
-
-    let oem = payload.oem_name.split('=').nth(1).unwrap_or("default").to_string();
 
     if cfg!(target_os = "macos") {
         let out_dir_64 = format!("out/{}_x64", oem);
