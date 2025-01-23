@@ -565,7 +565,10 @@ async fn build_installer(src_path: &str, out_dir: &str, _config: toml::Value, se
     Ok(())
 }
 
-async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, server_addr: &str, task_id: i64, _payload: &PkgBuildRequest, db_pool: &SqlitePool, _x64: bool) -> anyhow::Result<()> {
+async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, _x64: bool) -> anyhow::Result<()> {
+    if !payload.is_increment {
+        fs::remove_dir_all(Path::new(src_path).join(out_dir)).await?;
+    }
     update_task_state(
         &server_addr,
         task_id,
@@ -752,12 +755,18 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
     let config: toml::Value = toml::from_str(&contents).unwrap();
     use std::path::Path;
 
-    let src_path = config["src"]["path"].as_str().unwrap();
-    // println!("Source code path: {}", src_path);
-
-    // if !payload.is_increment {
-    //     let _ = std::fs::remove_dir_all(&output_path);
-    // }
+    let src_path = {
+            if let Some(custom_args) = config.get("src") {
+                if let Some(src) = custom_args.get(std::env::consts::OS) {
+                    src.as_str().unwrap()
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            }
+        };
+    println!("Source code path: {}", src_path);
 
     update_task_state(
         &server_addr,

@@ -13,10 +13,11 @@ oem = [
 
 [git]
 addr = "ssh://10.0.10.15:29418/108.0.5359.215"
-user = "shangzhij"
 
 [src]
-path = "G:/snow_108_pkg/108.0.5359.215"
+windows = "G:/snow_108_pkg/108.0.5359.215"
+linux = "/home/snowtech/code/code/108.0.5359.215"
+macos = "/Users/snow/code/git/108.0.5359.215"
 db = "backup.db"
 
 [dev_tools]
