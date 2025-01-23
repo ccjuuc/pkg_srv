@@ -50,6 +50,14 @@ windows = [
 linux = [
   "grpc_use_static_linking=true",
   "is_official_build=true",
-  "use_large_pdbs=true",
+  "symbol_level=1",
+  "blink_symbol_level=1",
+  "is_clang=true",
 ]
-macos = ["use_system_xcode=true"]
+macos = [
+  "use_system_xcode=true",
+  "is_debug=false",
+  "is_component_build=false",
+  "is_clang=true",
+  "is_official_build=true"
+]
