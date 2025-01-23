@@ -36,7 +36,7 @@ linux = "/home/snowtech/backup"
 macos = "/Users/snow/backup"
 
 [server]
-windows = ["localhost:3000","10.0.10.14:3000"]
+windows = ["10.2.0.148:3000"]
 macos = ["10.0.80.38:3000"]
 linux = ["10.2.0.239:3000"]
 

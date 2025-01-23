@@ -254,10 +254,6 @@ pub async fn build_package(
     file.read_to_string(&mut contents).await.unwrap();
 
     let config: toml::Value = toml::from_str(&contents).unwrap();
-    let server_addr = config["git"]["addr"].as_str().unwrap();
-    let server_user = config["git"]["user"].as_str().unwrap();
-    let server_addr = format!("ssh://{}@{}", server_user, server_addr);
-    println!("git address: {}", server_addr);
 
     let src_path = config["src"]["path"].as_str().unwrap();
     println!("Source code path: {}", src_path);
@@ -273,7 +269,7 @@ pub async fn build_package(
         if let Err(e) = do_build(&payload_clone, &db_pool_clone).await {
             let task_id = e.downcast_ref::<i64>().unwrap_or(&-1);
             update_task_state(
-                &server_addr,
+                "",
                 *task_id,
                 "",
                 "",
