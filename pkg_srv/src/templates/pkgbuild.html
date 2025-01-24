@@ -185,7 +185,7 @@
                 console.log(task);
 
                 const installerCell = row.insertCell();
-                if (task.installer === null) {
+                if (task.installer === null || task.installer === "") {
                     installerCell.textContent = "";
                 } else {
                     console.log(task.installer);

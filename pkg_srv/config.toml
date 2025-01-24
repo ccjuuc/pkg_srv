@@ -36,9 +36,20 @@ linux = "/home/snowtech/backup"
 macos = "/Users/snow/backup"
 
 [server]
-windows = ["10.2.0.148:3000"]
+windows = ["10.0.10.14:3000"]
 macos = ["10.0.80.38:3000"]
 linux = ["10.2.0.239:3000"]
+
+[email]
+web = "10.0.10.14:3000"
+smtp = "smtp.163.com"
+from = "ccjuuc@163.com"
+password = "BVjEVanDF2jwbWjF"
+to = [
+  "ccjuuc@163.com",
+  "shangzhijie@snowtech.com.cn"
+]
+
 
 [gn_default_args]
 windows = [

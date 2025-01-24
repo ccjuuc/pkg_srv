@@ -4,6 +4,10 @@ use std::process::Output;
 use std::{env, vec};
 use std::{path::PathBuf, process::Command};
 
+use lettre::message::{Mailbox, Message, SinglePart};
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{SmtpTransport, Transport};
+
 use axum::http::header::{self};
 use axum::response::Response;
 use axum::{
@@ -12,6 +16,7 @@ use axum::{
     response::IntoResponse,
 };
 use crypto::{digest::Digest, md5::Md5};
+use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -20,7 +25,6 @@ use sqlx::{Executor, Row, SqlitePool};
 use tokio::fs;
 use tokio::{fs::File, io::AsyncReadExt, task};
 use toml;
-use regex::Regex;
 use walkdir::WalkDir;
 
 #[cfg(target_os = "windows")]
@@ -94,7 +98,6 @@ pub struct PkgBuildRequest {
     password: String,
 }
 
-
 #[derive(Deserialize)]
 pub struct UpdateTaskRequest {
     id: i64,
@@ -134,7 +137,7 @@ pub async fn server_list() -> impl IntoResponse {
     file.read_to_string(&mut contents).await.unwrap();
 
     let config: toml::Value = toml::from_str(&contents).unwrap();
-    let data  = serde_json::to_string(&config["server"]).unwrap();
+    let data = serde_json::to_string(&config["server"]).unwrap();
 
     (StatusCode::OK, data)
 }
@@ -150,9 +153,12 @@ pub async fn oem_list() -> impl IntoResponse {
     (StatusCode::OK, data)
 }
 
-pub async fn delete_task(State(db_pool): State<SqlitePool>, Json(payload): Json<DeleteTaskRequest>) -> impl IntoResponse {
+pub async fn delete_task(
+    State(db_pool): State<SqlitePool>,
+    Json(payload): Json<DeleteTaskRequest>,
+) -> impl IntoResponse {
     let task_id = payload.task_id;
-    
+
     let record = match sqlx::query("SELECT * FROM pkg WHERE id = ?")
         .bind(task_id)
         .fetch_one(&db_pool)
@@ -168,15 +174,18 @@ pub async fn delete_task(State(db_pool): State<SqlitePool>, Json(payload): Json<
     }
 
     match sqlx::query("DELETE FROM pkg WHERE id = ?")
-    .bind(task_id)
-    .execute(&db_pool)
-    .await
+        .bind(task_id)
+        .execute(&db_pool)
+        .await
     {
         Ok(_) => {}
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete task".into()),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to delete task".into(),
+            )
+        }
     }
-
-    
 
     (StatusCode::OK, "Task deleted")
 }
@@ -256,19 +265,22 @@ pub async fn build_package(
     let config: toml::Value = toml::from_str(&contents).unwrap();
 
     let src_path = {
-            if let Some(custom_args) = config.get("src") {
-                if let Some(src) = custom_args.get(std::env::consts::OS) {
-                    src.as_str().unwrap()
-                } else {
-                    ""
-                }
+        if let Some(custom_args) = config.get("src") {
+            if let Some(src) = custom_args.get(std::env::consts::OS) {
+                src.as_str().unwrap()
             } else {
                 ""
             }
-        };
+        } else {
+            ""
+        }
+    };
 
     if src_path.is_empty() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Source code path not found");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Source code path not found",
+        );
     }
 
     println!("Branch: {}", payload.branch);
@@ -280,17 +292,9 @@ pub async fn build_package(
     let db_pool_clone = db_pool.clone();
     task::spawn(async move {
         if let Err(e) = do_build(&payload_clone, &db_pool_clone).await {
+            println!("Build failed: {:?}", e);
             let task_id = e.downcast_ref::<i64>().unwrap_or(&-1);
-            update_task_state(
-                "",
-                *task_id,
-                "",
-                "",
-                "",
-                "failed",
-                &db_pool_clone,
-            )
-            .await;
+            update_task_state("", *task_id, "", "", "", "failed", &db_pool_clone).await;
         }
     });
 
@@ -340,7 +344,8 @@ pub async fn update_task(
         &payload.installer,
         &payload.state,
         &db_pool,
-    ).await;
+    )
+    .await;
     (StatusCode::OK, "Task updated")
 }
 
@@ -356,10 +361,14 @@ pub async fn add_task(
         payload.is_increment,
         payload.is_signed,
         &db_pool,
-    ).await;
+    )
+    .await;
     match task_id {
         Ok(id) => (StatusCode::OK, id.to_string()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to add task".to_string()),  
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to add task".to_string(),
+        ),
     }
 }
 
@@ -375,15 +384,15 @@ async fn add_task_state(
     let mut task_id: i64 = -1;
     if !db_pool.is_closed() {
         task_id = sqlx::query_scalar(ADD_TASK)
-        .bind(branch)
-        .bind(oem_name)
-        .bind(commit_id)
-        .bind(is_increment)
-        .bind(is_signed)
-        .bind(server)
-        .fetch_one(db_pool)
-        .await
-        .expect("failed to add task");
+            .bind(branch)
+            .bind(oem_name)
+            .bind(commit_id)
+            .bind(is_increment)
+            .bind(is_signed)
+            .bind(server)
+            .fetch_one(db_pool)
+            .await
+            .expect("failed to add task");
     } else {
         let client = Client::new();
         let response = client
@@ -442,11 +451,18 @@ async fn copy_debug_files(data_dir: &Path, backup_dir: &Path, oem: &str) -> anyh
     if !backup_dir.exists() {
         fs::create_dir_all(&backup_dir).await.unwrap();
     }
-    for entry in WalkDir::new(data_dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(data_dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             let file_name = entry.file_name().to_string_lossy().to_string();
             let file_name_lower = file_name.to_lowercase();
-            if file_name.ends_with(".pdb") || file_name.ends_with(".dbg") || file_name.ends_with(".debug") {
+            if file_name.ends_with(".pdb")
+                || file_name.ends_with(".dbg")
+                || file_name.ends_with(".debug")
+            {
                 if file_name_lower.contains(oem) {
                     fs::copy(entry.path(), backup_dir.join(file_name)).await?;
                 }
@@ -456,7 +472,18 @@ async fn copy_debug_files(data_dir: &Path, backup_dir: &Path, oem: &str) -> anyh
     Ok(())
 }
 
-async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::Value, server_addr: &str, task_id: i64, db_pool: &SqlitePool, oem: &str, installer: HashMap<&str,&str>,installer_64: HashMap<&str,&str>) -> anyhow::Result<()> {
+async fn backup(
+    src_path: &str,
+    out_dir: &str,
+    out_dir_64: &str,
+    config: toml::Value,
+    server_addr: &str,
+    task_id: i64,
+    db_pool: &SqlitePool,
+    oem: &str,
+    installer: HashMap<&str, &str>,
+    installer_64: HashMap<&str, &str>,
+) -> anyhow::Result<()> {
     if let Some(backup_path) = config.get("backup_path") {
         if let Some(path) = backup_path.get(std::env::consts::OS) {
             let backup_dir = path.as_str().unwrap_or_default();
@@ -466,12 +493,13 @@ async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::V
                 fs::create_dir_all(&date_dir).await.unwrap();
                 let end_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-                let dst= Path::new(src_path).join(out_dir);
+                let dst = Path::new(src_path).join(out_dir);
                 let backup_subfolder = date_dir.join(oem);
 
                 for (installer, _) in installer.iter() {
                     let _ = fs::copy(&dst.join(installer), date_dir.join(installer)).await;
                 }
+
                 let dst_64 = Path::new(src_path).join(out_dir_64);
                 let backup_subfolder_64 = date_dir.join(format!("{}_x64", oem));
 
@@ -481,7 +509,10 @@ async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::V
 
                 let mut installer = installer.clone();
                 installer.extend(installer_64);
-                let installer_vec: Vec<(String, String)> = installer.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                let installer_vec: Vec<(String, String)> = installer
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
                 let installer_json = serde_json::to_string(&installer_vec).unwrap();
 
                 update_task_state(
@@ -494,7 +525,7 @@ async fn backup(src_path: &str, out_dir: &str, out_dir_64: &str, config: toml::V
                     db_pool,
                 )
                 .await;
-                
+
                 if !oem.is_empty() {
                     if !out_dir.is_empty() {
                         copy_debug_files(&dst, &backup_subfolder, oem).await?;
@@ -512,7 +543,11 @@ async fn calc_installer_md5(pkg_path: &str, extension: &str) -> (String, String)
     let mut installer_file = pkg_path.to_string();
     let mut md5 = String::new();
     if Path::new(pkg_path).is_dir() {
-        for entry in WalkDir::new(pkg_path).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(pkg_path)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path();
             if path.is_file() {
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -543,38 +578,58 @@ async fn calc_installer_md5(pkg_path: &str, extension: &str) -> (String, String)
             .unwrap()
             .to_string_lossy()
             .to_string(),
-        md5
+        md5,
     )
 }
 
-
-async fn build_installer(src_path: &str, out_dir: &str, _config: toml::Value, server_addr: &str, task_id: i64, _payload: &PkgBuildRequest, db_pool: &SqlitePool, _x64: bool) -> anyhow::Result<()> {
-        update_task_state(
-            &server_addr,
-            task_id,
-            "",
-            "",
-            "",
-            "build installer",
-            db_pool,
-        )
-        .await;
-        let mini_installer_command = format!("ninja -C {} {}", out_dir, os::INSTALLER_PROJECT);
-        let mut mini_installer_output = Command::new(os::SHELL[0])
-            .arg(os::SHELL[1])
-            .arg(&mini_installer_command)
-            .current_dir(&src_path)
-            .spawn()
-            .expect("failed to execute build installer command");
-        if !mini_installer_output.wait().unwrap().success() {
-            println!("mini_installer failed");
-            return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, mini_installer_command)));
-        }
+async fn build_installer(
+    src_path: &str,
+    out_dir: &str,
+    _config: toml::Value,
+    server_addr: &str,
+    task_id: i64,
+    _payload: &PkgBuildRequest,
+    db_pool: &SqlitePool,
+    _x64: bool,
+) -> anyhow::Result<()> {
+    update_task_state(
+        &server_addr,
+        task_id,
+        "",
+        "",
+        "",
+        "build installer",
+        db_pool,
+    )
+    .await;
+    let mini_installer_command = format!("ninja -C {} {}", out_dir, os::INSTALLER_PROJECT);
+    let mut mini_installer_output = Command::new(os::SHELL[0])
+        .arg(os::SHELL[1])
+        .arg(&mini_installer_command)
+        .current_dir(&src_path)
+        .spawn()
+        .expect("failed to execute build installer command");
+    if !mini_installer_output.wait().unwrap().success() {
+        println!("mini_installer failed");
+        return Err(anyhow::anyhow!(format!(
+            "task_id: {}, command: {}",
+            task_id, mini_installer_command
+        )));
+    }
 
     Ok(())
 }
 
-async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, _x64: bool) -> anyhow::Result<()> {
+async fn build_project(
+    src_path: &str,
+    out_dir: &str,
+    _config: toml::Value,
+    server_addr: &str,
+    task_id: i64,
+    payload: &PkgBuildRequest,
+    db_pool: &SqlitePool,
+    _x64: bool,
+) -> anyhow::Result<()> {
     if !payload.is_increment {
         fs::remove_dir_all(Path::new(src_path).join(out_dir)).await?;
     }
@@ -598,7 +653,10 @@ async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, serv
 
     if !pre_build_output.wait().unwrap().success() {
         println!("pre_build failed");
-        return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, pre_build_command)));
+        return Err(anyhow::anyhow!(format!(
+            "task_id: {}, command: {}",
+            task_id, pre_build_command
+        )));
     }
 
     update_task_state(&server_addr, task_id, "", "", "", "build base", db_pool).await;
@@ -611,19 +669,13 @@ async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, serv
         .expect("failed to execute base build command");
     if !base_build_output.wait().unwrap().success() {
         println!("base_build failed");
-        return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, base_build_command)));
+        return Err(anyhow::anyhow!(format!(
+            "task_id: {}, command: {}",
+            task_id, base_build_command
+        )));
     }
 
-    update_task_state(
-        &server_addr,
-        task_id,
-        "",
-        "",
-        "",
-        "build chrome",
-        db_pool,
-    )
-    .await;
+    update_task_state(&server_addr, task_id, "", "", "", "build chrome", db_pool).await;
     let chrome_build_command = format!("ninja -C {} chrome", out_dir);
     let mut chrome_build_output = Command::new(os::SHELL[0])
         .arg(os::SHELL[1])
@@ -631,16 +683,28 @@ async fn build_project(src_path: &str, out_dir: &str, _config: toml::Value, serv
         .current_dir(&src_path)
         .spawn()
         .expect("failed to execute chrome build command");
-    
+
     if !chrome_build_output.wait().unwrap().success() {
         println!("chrome_build failed");
-        return Err(anyhow::anyhow!(format!("task_id: {}, command: {}", task_id, chrome_build_command)));
+        return Err(anyhow::anyhow!(format!(
+            "task_id: {}, command: {}",
+            task_id, chrome_build_command
+        )));
     }
 
     Ok(())
 }
 
-async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server_addr: &str, task_id: i64, payload: &PkgBuildRequest, db_pool: &SqlitePool, x64: bool) -> anyhow::Result<()> {
+async fn make_project(
+    src_path: &str,
+    out_dir: &str,
+    config: toml::Value,
+    server_addr: &str,
+    task_id: i64,
+    payload: &PkgBuildRequest,
+    db_pool: &SqlitePool,
+    x64: bool,
+) -> anyhow::Result<()> {
     let mut args = vec![];
 
     if let Some(custom_args) = config.get("gn_default_args") {
@@ -657,11 +721,15 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
     if !target_cpu.is_empty() {
         args.push(target_cpu);
     }
-    
+
     #[warn(unused_assignments)]
     let mut oem_arg = "".to_string();
     if !payload.oem_name.is_empty() {
-        let prefix = payload.oem_name.split('=').nth(0).unwrap_or("current_xn_brand");
+        let prefix = payload
+            .oem_name
+            .split('=')
+            .nth(0)
+            .unwrap_or("current_xn_brand");
         let oem = payload.oem_name.split('=').nth(1).unwrap_or("normal");
         oem_arg = format!("{}=\\\"{}\\\"", prefix, oem);
         args.push(&oem_arg);
@@ -673,16 +741,7 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
         args.push(&payload.password);
     }
 
-    update_task_state(
-        &server_addr,
-        task_id,
-        "",
-        "",
-        "",
-        "gen project",
-        db_pool,
-    )
-    .await;
+    update_task_state(&server_addr, task_id, "", "", "", "gen project", db_pool).await;
 
     let ide_args = if os::IDE.is_empty() {
         ""
@@ -727,7 +786,12 @@ async fn make_project(src_path: &str, out_dir: &str, config: toml::Value, server
 }
 async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Result<()> {
     let server_addr = payload.server.clone();
-    let oem = payload.oem_name.split('=').nth(1).unwrap_or("default").to_string();
+    let oem = payload
+        .oem_name
+        .split('=')
+        .nth(1)
+        .unwrap_or("default")
+        .to_string();
     let task_id = add_task_state(
         &server_addr,
         &payload.branch,
@@ -735,8 +799,10 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         payload.commit_id.as_deref().unwrap_or(""),
         payload.is_increment,
         payload.is_signed,
-        db_pool
-    ).await.unwrap_or(-1);
+        db_pool,
+    )
+    .await
+    .unwrap_or(-1);
 
     let _task = Task {
         id: task_id,
@@ -765,28 +831,19 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
     use std::path::Path;
 
     let src_path = {
-            if let Some(custom_args) = config.get("src") {
-                if let Some(src) = custom_args.get(std::env::consts::OS) {
-                    src.as_str().unwrap()
-                } else {
-                    ""
-                }
+        if let Some(custom_args) = config.get("src") {
+            if let Some(src) = custom_args.get(std::env::consts::OS) {
+                src.as_str().unwrap()
             } else {
                 ""
             }
-        };
+        } else {
+            ""
+        }
+    };
     println!("Source code path: {}", src_path);
 
-    update_task_state(
-        &server_addr,
-        task_id,
-        "",
-        "",
-        "",
-        "checkout...",
-        db_pool,
-    )
-    .await;
+    update_task_state(&server_addr, task_id, "", "", "", "checkout...", db_pool).await;
     update_code(src_path, &payload.branch, &payload.commit_id);
 
     if let Some(clean) = config.get("clean") {
@@ -806,11 +863,51 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
 
     if cfg!(target_os = "macos") {
         let out_dir_64 = format!("out/{}_x64", oem);
-        make_project(src_path, &out_dir_64, config.clone(),&server_addr,task_id,payload, db_pool, false).await?;
-        build_project(src_path, &out_dir_64, config.clone(), &server_addr, task_id, payload, db_pool, true).await?;
+        make_project(
+            src_path,
+            &out_dir_64,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            false,
+        )
+        .await?;
+        build_project(
+            src_path,
+            &out_dir_64,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            true,
+        )
+        .await?;
         let out_dir = format!("out/{}", oem);
-        make_project(src_path, &out_dir, config.clone(),&server_addr,task_id,payload, db_pool, true).await?;
-        build_project(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, false).await?;
+        make_project(
+            src_path,
+            &out_dir,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            true,
+        )
+        .await?;
+        build_project(
+            src_path,
+            &out_dir,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            false,
+        )
+        .await?;
         let pkg = format!("{}/{} Browser.app", out_dir, payload.oem_name);
         let pkg_64 = format!("{}/{} Browser.app", out_dir_64, payload.oem_name);
         let pkg_target_dir = format!("out/release_universalizer_{}/", payload.oem_name);
@@ -819,7 +916,10 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         }
         fs::create_dir_all(&pkg_target_dir).await?;
         let pkg_target = format!("{}/{} Browser.app", pkg_target_dir, payload.oem_name);
-        let universalizer_command = format!("python3 chrome/installer/mac/universalizer.py {} {} {}", pkg, pkg_64, pkg_target);
+        let universalizer_command = format!(
+            "python3 chrome/installer/mac/universalizer.py {} {} {}",
+            pkg, pkg_64, pkg_target
+        );
         let mut universalizer_output = Command::new(os::SHELL[0])
             .arg(os::SHELL[1])
             .arg(&universalizer_command)
@@ -832,10 +932,10 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         }
         //压缩pkg_target
         let pkg_target_zip = format!("{}.zip", pkg_target);
-        let zip_command = format!("zip -r -j {} {}", pkg_target_zip, pkg_target);
-        let mut zip_output = Command::new(os::SHELL[0])
-            .arg(os::SHELL[1])
-            .arg(&zip_command)
+        let mut zip_output = Command::new("zip")
+            .arg("-r")
+            .arg(&pkg_target_zip)
+            .arg(&pkg_target)
             .current_dir(&src_path)
             .spawn()
             .expect("failed to execute zip command");
@@ -860,14 +960,55 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
         let (installer, md5) = calc_installer_md5(&pkg_target_zip, "zip").await;
         let mut installer_map = HashMap::new();
         installer_map.insert(installer.as_str(), md5.as_str());
-        backup(src_path, out_dir.as_str(), out_dir_64.as_str(), config.clone(), &server_addr, task_id, db_pool, &oem, installer_map, HashMap::new()).await?;
-    }
-    else {
+        backup(
+            src_path,
+            out_dir.as_str(),
+            out_dir_64.as_str(),
+            config.clone(),
+            &server_addr,
+            task_id,
+            db_pool,
+            &oem,
+            installer_map,
+            HashMap::new(),
+        )
+        .await?;
+    } else {
         let out_dir: String = format!("out/{}{}", oem, if payload.is_x64 { "_x64" } else { "" });
         let dst = Path::new(src_path).join(&out_dir);
-        make_project(src_path, &out_dir, config.clone(),&server_addr,task_id,payload, db_pool, payload.is_x64).await?;
-        build_project(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, payload.is_x64).await?;
-        build_installer(src_path, &out_dir, config.clone(), &server_addr, task_id, payload, db_pool, payload.is_x64).await?;
+        make_project(
+            src_path,
+            &out_dir,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            payload.is_x64,
+        )
+        .await?;
+        build_project(
+            src_path,
+            &out_dir,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            payload.is_x64,
+        )
+        .await?;
+        build_installer(
+            src_path,
+            &out_dir,
+            config.clone(),
+            &server_addr,
+            task_id,
+            payload,
+            db_pool,
+            payload.is_x64,
+        )
+        .await?;
         if cfg!(target_os = "linux") {
             let (installer_deb, md5_deb) = calc_installer_md5(dst.to_str().unwrap(), "deb").await;
             let (installer_rpm, md5_rpm) = calc_installer_md5(dst.to_str().unwrap(), "rpm").await;
@@ -896,24 +1037,132 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
                 return Err(anyhow::anyhow!(task_id));
             }
 
-            let mut installer = HashMap::new(); 
+            let mut installer = HashMap::new();
             installer.insert(installer_deb.as_str(), md5_deb.as_str());
             installer.insert(installer_rpm.as_str(), md5_rpm.as_str());
-            backup(src_path, out_dir.as_str(), "", config.clone(), &server_addr, task_id, db_pool, &oem, installer, HashMap::new()).await?;
-        }
-        else {
+            backup(
+                src_path,
+                out_dir.as_str(),
+                "",
+                config.clone(),
+                &server_addr,
+                task_id,
+                db_pool,
+                &oem,
+                installer,
+                HashMap::new(),
+            )
+            .await?;
+        } else {
             let (installer, md5) = calc_installer_md5(dst.to_str().unwrap(), "exe").await;
             let mut installer_map = HashMap::new();
             installer_map.insert(installer.as_str(), md5.as_str());
-            backup(src_path, out_dir.as_str(), "", config.clone(), &server_addr, task_id, db_pool, &oem, installer_map, HashMap::new()).await?;
+            backup(
+                src_path,
+                out_dir.as_str(),
+                "",
+                config.clone(),
+                &server_addr,
+                task_id,
+                db_pool,
+                &oem,
+                installer_map,
+                HashMap::new(),
+            )
+            .await?;
         }
     }
 
     println!("Task {} finished", task_id);
-
+    send_email(&oem, config, task_id, &payload).await?;
     Ok(())
 }
 
+async fn send_email(
+    oem: &str,
+    config: toml::Value,
+    task_id: i64,
+    payload: &PkgBuildRequest,
+) -> anyhow::Result<()> {
+    let web = {
+        if let Some(email) = config.get("email") {
+            email.get("web").map_or("", |v| v.as_str().unwrap_or(""))
+        } else {
+            ""
+        }
+    };
+
+    let email_from = {
+        if let Some(email) = config.get("email") {
+            email.get("from").map_or("", |v| v.as_str().unwrap_or(""))
+        } else {
+            ""
+        }
+    };
+
+    let email_server = {
+        if let Some(email) = config.get("email") {
+            email.get("smtp").map_or("", |v| v.as_str().unwrap_or(""))
+        } else {
+            ""
+        }
+    };
+
+    let email_password = {
+        if let Some(email) = config.get("email") {
+            email
+                .get("password")
+                .map_or("", |v| v.as_str().unwrap_or(""))
+        } else {
+            ""
+        }
+    };
+
+    let email_to: Vec<Mailbox> = {
+        if let Some(email) = config.get("email") {
+            email
+                .get("to")
+                .and_then(|v| v.as_array())
+                .map_or(vec![], |arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.parse().unwrap()))
+                        .collect()
+                })
+        } else {
+            vec![]
+        }
+    };
+    let data = serde_json::json!({
+        "task_id": task_id,
+        "branch": payload.branch,
+        "oem_name": oem,
+        "platform": payload.platform,
+        "server": payload.server,
+        "link": web,
+    });
+
+    let mut email_builder = Message::builder()
+    .from(email_from.parse().unwrap())
+    .subject(payload.platform.clone() + " Build Task");
+
+    for recipient in email_to.iter() {
+        email_builder = email_builder.to(recipient.clone());
+    }
+
+    let email = email_builder
+    .singlepart(SinglePart::plain(serde_json::to_string_pretty(&data).unwrap_or("".to_string())))
+    .unwrap();
+
+    let creds = Credentials::new(email_from.to_string(), email_password.to_string());
+
+    let mailer = SmtpTransport::relay(email_server)
+        .unwrap()
+        .credentials(creds)
+        .build();
+
+    let _ = mailer.send(&email);
+    Ok(())
+}
 pub async fn init_db() -> anyhow::Result<sqlx::SqlitePool> {
     let mut database_path = PathBuf::from(env::current_dir()?);
 
@@ -937,7 +1186,12 @@ pub async fn init_db() -> anyhow::Result<sqlx::SqlitePool> {
         if let Some(dev_path) = dev_tools.get(std::env::consts::OS) {
             let current_path = env::var("PATH").unwrap_or_default();
             let separator = if cfg!(windows) { ";" } else { ":" };
-            let env_additon = format!("{}{}{}", dev_path.as_str().unwrap(),separator, current_path);
+            let env_additon = format!(
+                "{}{}{}",
+                dev_path.as_str().unwrap(),
+                separator,
+                current_path
+            );
             env::set_var("PATH", env_additon.clone());
         }
     }
@@ -946,7 +1200,12 @@ pub async fn init_db() -> anyhow::Result<sqlx::SqlitePool> {
         if let Some(python_path) = python.get(std::env::consts::OS) {
             let current_path = env::var("PATH").unwrap_or_default();
             let separator = if cfg!(windows) { ";" } else { ":" };
-            let env_additon = format!("{}{}{}", python_path.as_str().unwrap(),separator, current_path);
+            let env_additon = format!(
+                "{}{}{}",
+                python_path.as_str().unwrap(),
+                separator,
+                current_path
+            );
             env::set_var("PATH", env_additon.clone());
         }
     }
