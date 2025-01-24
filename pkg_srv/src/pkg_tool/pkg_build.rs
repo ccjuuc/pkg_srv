@@ -936,7 +936,7 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
             .arg("-r")
             .arg(&pkg_target_zip)
             .arg(&pkg_target)
-            .current_dir(&src_path)
+            .current_dir(Path::new(&src_path).join(pkg_target_dir))
             .spawn()
             .expect("failed to execute zip command");
         if !zip_output.wait().unwrap().success() {
@@ -1014,22 +1014,22 @@ async fn do_build(payload: &PkgBuildRequest, db_pool: &SqlitePool) -> anyhow::Re
             let (installer_rpm, md5_rpm) = calc_installer_md5(dst.to_str().unwrap(), "rpm").await;
             let pkg_target_deb_zip = format!("{}.zip", installer_deb);
             let pkg_target_rpm_zip = format!("{}.zip", installer_rpm);
-            let zip_command_deb = format!("zip -r -j {} {}", pkg_target_deb_zip, installer_deb);
+            let zip_command_deb = format!("zip {} {}", pkg_target_deb_zip, installer_deb);
             let mut zip_output = Command::new(os::SHELL[0])
                 .arg(os::SHELL[1])
                 .arg(&zip_command_deb)
-                .current_dir(&src_path)
+                .current_dir(Path::new(&src_path).join(out_dir.clone()))
                 .spawn()
                 .expect("failed to execute zip command");
             if !zip_output.wait().unwrap().success() {
                 println!("zip failed");
                 return Err(anyhow::anyhow!(task_id));
             }
-            let zip_command_rpm = format!("zip -r -j {} {}", pkg_target_rpm_zip, installer_rpm);
+            let zip_command_rpm = format!("zip {} {}", pkg_target_rpm_zip, installer_rpm);
             let mut zip_output = Command::new(os::SHELL[0])
                 .arg(os::SHELL[1])
                 .arg(&zip_command_rpm)
-                .current_dir(&src_path)
+                .current_dir(Path::new(&src_path).join(out_dir.clone()))
                 .spawn()
                 .expect("failed to execute zip command");
             if !zip_output.wait().unwrap().success() {
